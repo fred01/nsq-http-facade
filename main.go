@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nsqio/go-nsq"
@@ -24,27 +25,20 @@ var (
 	bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
 
 	producer              *nsq.Producer
-	sharedConsumers       = make(map[string]*sharedConsumer)
-	sharedConsumersMutex  sync.RWMutex
+	consumers             = make(map[string]*nsq.Consumer)
+	consumersMutex        sync.RWMutex
 	activeMessages        = make(map[string]*messageWithExpiry)
 	activeMessagesMutex   sync.RWMutex
 	bearerTokenHash       [32]byte
 	messageCleanupTicker  *time.Ticker
 	messageExpiryDuration = 5 * time.Minute
+	consumerIDCounter     uint64
 )
 
 // messageWithExpiry wraps an NSQ message with an expiry time
 type messageWithExpiry struct {
 	message *nsq.Message
 	expiry  time.Time
-}
-
-// sharedConsumer represents a single NSQ consumer shared by multiple HTTP clients
-type sharedConsumer struct {
-	consumer    *nsq.Consumer
-	messageChan chan *nsq.Message
-	clientCount int
-	mu          sync.Mutex
 }
 
 func main() {
@@ -257,34 +251,43 @@ func handleConsumers(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Invalid endpoint", http.StatusNotFound)
 }
 
-// handleConsumerStatus returns status of a consumer
+// handleConsumerStatus returns aggregated status of all consumers for a topic/channel
 func handleConsumerStatus(w http.ResponseWriter, r *http.Request, topic, channel string) {
-	consumerKey := fmt.Sprintf("%s:%s", topic, channel)
+	prefix := fmt.Sprintf("%s:%s:", topic, channel)
 
-	sharedConsumersMutex.RLock()
-	sc, exists := sharedConsumers[consumerKey]
-	sharedConsumersMutex.RUnlock()
+	consumersMutex.RLock()
+	var matchingConsumers []*nsq.Consumer
+	for key, consumer := range consumers {
+		if strings.HasPrefix(key, prefix) {
+			matchingConsumers = append(matchingConsumers, consumer)
+		}
+	}
+	consumersMutex.RUnlock()
 
-	if !exists {
-		http.Error(w, "Consumer not found", http.StatusNotFound)
+	if len(matchingConsumers) == 0 {
+		http.Error(w, "No consumers found for this topic/channel", http.StatusNotFound)
 		return
 	}
 
-	sc.mu.Lock()
-	clientCount := sc.clientCount
-	sc.mu.Unlock()
-
-	stats := sc.consumer.Stats()
+	// Aggregate stats from all consumers
+	var totalConnections, totalMessages, totalFinished, totalRequeued int
+	for _, consumer := range matchingConsumers {
+		stats := consumer.Stats()
+		totalConnections += stats.Connections
+		totalMessages += int(stats.MessagesReceived)
+		totalFinished += int(stats.MessagesFinished)
+		totalRequeued += int(stats.MessagesRequeued)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"topic":       topic,
 		"channel":     channel,
-		"connections": stats.Connections,
-		"messages":    stats.MessagesReceived,
-		"finished":    stats.MessagesFinished,
-		"requeued":    stats.MessagesRequeued,
-		"clients":     clientCount,
+		"consumers":   len(matchingConsumers),
+		"connections": totalConnections,
+		"messages":    totalMessages,
+		"finished":    totalFinished,
+		"requeued":    totalRequeued,
 	})
 }
 
@@ -293,7 +296,7 @@ type RdyRequest struct {
 	Count int `json:"count"`
 }
 
-// handleConsumerRdy handles RDY control for consumers
+// handleConsumerRdy handles RDY control for all consumers of a topic/channel
 func handleConsumerRdy(w http.ResponseWriter, r *http.Request, topic, channel string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -306,21 +309,32 @@ func handleConsumerRdy(w http.ResponseWriter, r *http.Request, topic, channel st
 		return
 	}
 
-	consumerKey := fmt.Sprintf("%s:%s", topic, channel)
+	prefix := fmt.Sprintf("%s:%s:", topic, channel)
 
-	sharedConsumersMutex.RLock()
-	sc, exists := sharedConsumers[consumerKey]
-	sharedConsumersMutex.RUnlock()
+	consumersMutex.RLock()
+	var matchingConsumers []*nsq.Consumer
+	for key, consumer := range consumers {
+		if strings.HasPrefix(key, prefix) {
+			matchingConsumers = append(matchingConsumers, consumer)
+		}
+	}
+	consumersMutex.RUnlock()
 
-	if !exists {
-		http.Error(w, "Consumer not found for this topic/channel", http.StatusNotFound)
+	if len(matchingConsumers) == 0 {
+		http.Error(w, "No consumers found for this topic/channel", http.StatusNotFound)
 		return
 	}
 
-	sc.consumer.ChangeMaxInFlight(req.Count)
+	// Apply RDY count to all consumers for this topic/channel
+	for _, consumer := range matchingConsumers {
+		consumer.ChangeMaxInFlight(req.Count)
+	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"consumers": len(matchingConsumers),
+	})
 }
 
 // handleMessages handles message lifecycle operations
@@ -395,7 +409,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 
 // handleConsumerEvents handles SSE endpoint for consuming messages
 // GET /api/events?topic=<topic>&channel=<channel>
-// Supports multiple concurrent clients for the same topic/channel pair
+// Each HTTP client gets its own NSQ consumer for native load balancing
 func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -423,91 +437,69 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	consumerKey := fmt.Sprintf("%s:%s", topic, channel)
+	// Create a unique consumer ID for this HTTP client
+	consumerID := atomic.AddUint64(&consumerIDCounter, 1)
+	consumerKey := fmt.Sprintf("%s:%s:%d", topic, channel, consumerID)
 
-	// Get or create shared consumer
-	sharedConsumersMutex.Lock()
-	sc, exists := sharedConsumers[consumerKey]
-	if !exists {
-		// Create new shared consumer
-		config := nsq.NewConfig()
-		consumer, err := nsq.NewConsumer(topic, channel, config)
-		if err != nil {
-			sharedConsumersMutex.Unlock()
-			http.Error(w, fmt.Sprintf("Failed to create consumer: %v", err), http.StatusInternalServerError)
-			return
-		}
+	// Create a channel for messages from this consumer
+	messageChan := make(chan *nsq.Message, 100)
 
-		sc = &sharedConsumer{
-			consumer:    consumer,
-			messageChan: make(chan *nsq.Message, 1000),
-			clientCount: 0,
-		}
-
-		// Add message handler
-		consumer.AddHandler(nsq.HandlerFunc(func(message *nsq.Message) error {
-			// Store message for lifecycle management
-			messageID := fmt.Sprintf("%s", message.ID)
-			activeMessagesMutex.Lock()
-			activeMessages[messageID] = &messageWithExpiry{
-				message: message,
-				expiry:  time.Now().Add(messageExpiryDuration),
-			}
-			activeMessagesMutex.Unlock()
-
-			// Disable auto-response, let client control lifecycle
-			message.DisableAutoResponse()
-
-			select {
-			case sc.messageChan <- message:
-				return nil
-			default:
-				// Channel full, requeue
-				activeMessagesMutex.Lock()
-				delete(activeMessages, messageID)
-				activeMessagesMutex.Unlock()
-				return fmt.Errorf("message channel full")
-			}
-		}))
-
-		// Connect to NSQd
-		if err := consumer.ConnectToNSQD(*nsqdAddress); err != nil {
-			sharedConsumersMutex.Unlock()
-			http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		sharedConsumers[consumerKey] = sc
+	// Create a new NSQ consumer for this HTTP client
+	config := nsq.NewConfig()
+	consumer, err := nsq.NewConsumer(topic, channel, config)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create consumer: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	// Increment client count
-	sc.mu.Lock()
-	sc.clientCount++
-	clientNum := sc.clientCount
-	sc.mu.Unlock()
-	sharedConsumersMutex.Unlock()
-
-	log.Printf("Client #%d connected to %s (total clients: %d)", clientNum, consumerKey, clientNum)
+	// Store consumer for RDY control
+	consumersMutex.Lock()
+	consumers[consumerKey] = consumer
+	consumersMutex.Unlock()
 
 	// Cleanup on disconnect
 	defer func() {
-		sharedConsumersMutex.Lock()
-		sc.mu.Lock()
-		sc.clientCount--
-		remainingClients := sc.clientCount
-		sc.mu.Unlock()
-
-		log.Printf("Client disconnected from %s (remaining clients: %d)", consumerKey, remainingClients)
-
-		// If no more clients, stop and remove the consumer
-		if remainingClients == 0 {
-			sc.consumer.Stop()
-			close(sc.messageChan)
-			delete(sharedConsumers, consumerKey)
-			log.Printf("Stopped consumer for %s (no more clients)", consumerKey)
-		}
-		sharedConsumersMutex.Unlock()
+		consumersMutex.Lock()
+		delete(consumers, consumerKey)
+		consumersMutex.Unlock()
+		consumer.Stop()
+		close(messageChan)
+		log.Printf("Consumer %s stopped and cleaned up", consumerKey)
 	}()
+
+	// Add message handler
+	consumer.AddHandler(nsq.HandlerFunc(func(message *nsq.Message) error {
+		// Store message for lifecycle management
+		messageID := fmt.Sprintf("%s", message.ID)
+		activeMessagesMutex.Lock()
+		activeMessages[messageID] = &messageWithExpiry{
+			message: message,
+			expiry:  time.Now().Add(messageExpiryDuration),
+		}
+		activeMessagesMutex.Unlock()
+
+		// Disable auto-response, let client control lifecycle
+		message.DisableAutoResponse()
+
+		select {
+		case messageChan <- message:
+			return nil
+		default:
+			// Channel full, requeue
+			activeMessagesMutex.Lock()
+			delete(activeMessages, messageID)
+			activeMessagesMutex.Unlock()
+			return fmt.Errorf("message channel full")
+		}
+	}))
+
+	// Connect to NSQd
+	if err := consumer.ConnectToNSQD(*nsqdAddress); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Consumer %s connected for topic=%s channel=%s", consumerKey, topic, channel)
 
 	// Stream messages as SSE
 	ctx := r.Context()
@@ -516,7 +508,7 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			// Client disconnected
 			return
-		case msg, ok := <-sc.messageChan:
+		case msg, ok := <-messageChan:
 			if !ok {
 				return
 			}

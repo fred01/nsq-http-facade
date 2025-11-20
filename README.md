@@ -6,7 +6,7 @@ A simple HTTP REST facade for NSQ (NSQd) written in Go. This service provides HT
 
 - **REST API** for NSQ operations
 - **Producer endpoints** (PUB, MPUB) - publish single or multiple messages
-- **Multiple concurrent consumers** - supports many clients connected to the same topic/channel
+- **Per-client NSQ consumers** - each HTTP client gets its own NSQ consumer for native load balancing
 - **Consumer SSE endpoint** - consume messages in real-time via Server-Sent Events
 - **Consumer control** - RDY flow control for consumers
 - **Message lifecycle management** - touch, finish, and requeue messages with automatic expiry
@@ -159,8 +159,8 @@ This endpoint returns a stream of Server-Sent Events. Each event contains:
 
 **Important Notes**:
 - Messages received via SSE have `DisableAutoResponse()` enabled. You must explicitly finish, requeue, or touch each message using the message lifecycle endpoints.
-- **Multiple clients** can connect to the same topic/channel simultaneously. They share a single NSQ consumer, so messages are distributed across all connected clients.
-- When all clients disconnect from a topic/channel, the consumer is automatically stopped and cleaned up.
+- **Native NSQ load balancing**: Each HTTP client creates its own NSQ consumer. When multiple clients connect to the same topic/channel, NSQ distributes messages across them (one message per consumer), just like native NSQ clients.
+- This enables horizontal scaling: add more HTTP clients to process messages in parallel.
 
 #### Set Consumer RDY Count
 
@@ -193,11 +193,11 @@ Response:
 {
   "topic": "your-topic",
   "channel": "your-channel",
-  "connections": 1,
+  "consumers": 3,
+  "connections": 3,
   "messages": 100,
   "finished": 95,
-  "requeued": 5,
-  "clients": 3
+  "requeued": 5
 }
 ```
 
@@ -295,19 +295,21 @@ curl -X POST http://localhost:8080/api/messages/12345678/finish \
 
 The facade maintains:
 - A single NSQ producer for publishing messages
-- **Shared NSQ consumers**: One consumer per topic/channel combination, shared by all connected HTTP clients
+- **Per-client NSQ consumers**: Each HTTP client connection creates its own NSQ consumer
+- **Native NSQ load balancing**: Messages are distributed by NSQ across all consumers for a channel (just like native NSQ)
 - **Active message registry**: Tracks in-flight messages with automatic expiry (5 minutes default)
 - **Background cleanup**: Periodic cleanup of expired messages to prevent memory leaks
 
-### How Multiple Clients Work
+### Load Balancing Example
 
-When multiple HTTP clients connect to the same topic/channel via SSE:
-1. The first client creates a shared NSQ consumer
-2. Subsequent clients increment the client count and receive messages from the same consumer
-3. Messages are distributed across all connected clients
-4. When the last client disconnects, the consumer is automatically stopped and cleaned up
+When you have 3 messages in a topic and 3 HTTP clients connected to the same channel:
+1. Client 1 connects → creates NSQ consumer #1
+2. Client 2 connects → creates NSQ consumer #2  
+3. Client 3 connects → creates NSQ consumer #3
+4. NSQ distributes the 3 messages: one to each consumer (client)
+5. Each client processes its message independently and calls finish/requeue
 
-This design allows efficient scaling of message consumption while maintaining a single NSQ connection per topic/channel.
+This mirrors native NSQ behavior where each consumer gets a share of the messages.
 
 ## Security
 
