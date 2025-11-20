@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ const testToken = "test-bearer-token"
 func setupTestEnv() {
 	// Set bearer token for tests
 	*bearerToken = testToken
+	// Pre-calculate bearer token hash for constant-time comparison
+	bearerTokenHash = sha256.Sum256([]byte(testToken))
 }
 
 func TestAuthMiddleware(t *testing.T) {

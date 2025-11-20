@@ -6,11 +6,13 @@ A simple HTTP REST facade for NSQ (NSQd) written in Go. This service provides HT
 
 - **REST API** for NSQ operations
 - **Producer endpoints** (PUB, MPUB) - publish single or multiple messages
+- **Multiple concurrent consumers** - supports many clients connected to the same topic/channel
 - **Consumer SSE endpoint** - consume messages in real-time via Server-Sent Events
 - **Consumer control** - RDY flow control for consumers
-- **Message lifecycle management** - touch, finish, and requeue messages
+- **Message lifecycle management** - touch, finish, and requeue messages with automatic expiry
 - **Admin pass-through** - proxy requests to NSQd HTTP API
-- **Bearer token authentication** - all endpoints are protected by bearer token
+- **Secure authentication** - constant-time bearer token validation to prevent timing attacks
+- **Memory leak prevention** - automatic cleanup of expired messages
 
 ## Installation
 
@@ -42,6 +44,17 @@ docker run -p 8080:8080 nsq-http-facade \
 
 The easiest way to get started is using Docker Compose, which sets up NSQ and the HTTP facade:
 
+1. Copy the example environment file:
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` and set a strong bearer token:
+```bash
+BEARER_TOKEN=your-strong-secret-token-here
+```
+
+3. Start the services:
 ```bash
 docker-compose up
 ```
@@ -144,7 +157,10 @@ This endpoint returns a stream of Server-Sent Events. Each event contains:
 }
 ```
 
-**Important**: Messages received via SSE have `DisableAutoResponse()` enabled. You must explicitly finish, requeue, or touch each message using the message lifecycle endpoints.
+**Important Notes**:
+- Messages received via SSE have `DisableAutoResponse()` enabled. You must explicitly finish, requeue, or touch each message using the message lifecycle endpoints.
+- **Multiple clients** can connect to the same topic/channel simultaneously. They share a single NSQ consumer, so messages are distributed across all connected clients.
+- When all clients disconnect from a topic/channel, the consumer is automatically stopped and cleaned up.
 
 #### Set Consumer RDY Count
 
@@ -180,7 +196,8 @@ Response:
   "connections": 1,
   "messages": 100,
   "finished": 95,
-  "requeued": 5
+  "requeued": 5,
+  "clients": 3
 }
 ```
 
@@ -278,12 +295,28 @@ curl -X POST http://localhost:8080/api/messages/12345678/finish \
 
 The facade maintains:
 - A single NSQ producer for publishing messages
-- Multiple NSQ consumers (one per topic/channel combination accessed via SSE)
-- Active message registry for lifecycle management
+- **Shared NSQ consumers**: One consumer per topic/channel combination, shared by all connected HTTP clients
+- **Active message registry**: Tracks in-flight messages with automatic expiry (5 minutes default)
+- **Background cleanup**: Periodic cleanup of expired messages to prevent memory leaks
+
+### How Multiple Clients Work
+
+When multiple HTTP clients connect to the same topic/channel via SSE:
+1. The first client creates a shared NSQ consumer
+2. Subsequent clients increment the client count and receive messages from the same consumer
+3. Messages are distributed across all connected clients
+4. When the last client disconnects, the consumer is automatically stopped and cleaned up
+
+This design allows efficient scaling of message consumption while maintaining a single NSQ connection per topic/channel.
 
 ## Security
 
 All endpoints require authentication via Bearer token. Set a strong token using the `-bearer-token` flag when starting the service.
+
+**Security Features**:
+- **Constant-time token comparison**: Prevents timing attacks on the bearer token
+- **Automatic message expiry**: Messages not processed within 5 minutes are requeued, preventing memory leaks
+- **No default token in Docker**: The Dockerfile requires explicit token configuration
 
 ## License
 

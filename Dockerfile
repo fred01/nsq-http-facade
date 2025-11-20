@@ -30,4 +30,4 @@ EXPOSE 8080
 
 # Run the application
 ENTRYPOINT ["./nsq-http-facade"]
-CMD ["-bearer-token", "changeme", "-nsqd-address", "nsqd:4150", "-nsqd-http-address", "nsqd:4151", "-http-address", ":8080"]
+CMD ["-nsqd-address", "nsqd:4150", "-nsqd-http-address", "nsqd:4151", "-http-address", ":8080"]

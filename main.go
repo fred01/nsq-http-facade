@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,12 +23,29 @@ var (
 	httpAddress  = flag.String("http-address", ":8080", "HTTP server address")
 	bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
 
-	producer            *nsq.Producer
-	consumers           = make(map[string]*nsq.Consumer)
-	consumersMutex      sync.RWMutex
-	activeMessages      = make(map[string]*nsq.Message)
-	activeMessagesMutex sync.RWMutex
+	producer              *nsq.Producer
+	sharedConsumers       = make(map[string]*sharedConsumer)
+	sharedConsumersMutex  sync.RWMutex
+	activeMessages        = make(map[string]*messageWithExpiry)
+	activeMessagesMutex   sync.RWMutex
+	bearerTokenHash       [32]byte
+	messageCleanupTicker  *time.Ticker
+	messageExpiryDuration = 5 * time.Minute
 )
+
+// messageWithExpiry wraps an NSQ message with an expiry time
+type messageWithExpiry struct {
+	message *nsq.Message
+	expiry  time.Time
+}
+
+// sharedConsumer represents a single NSQ consumer shared by multiple HTTP clients
+type sharedConsumer struct {
+	consumer    *nsq.Consumer
+	messageChan chan *nsq.Message
+	clientCount int
+	mu          sync.Mutex
+}
 
 func main() {
 	flag.Parse()
@@ -33,6 +53,9 @@ func main() {
 	if *bearerToken == "" {
 		log.Fatalf("Bearer token is required. Use -bearer-token flag")
 	}
+
+	// Pre-calculate bearer token hash for constant-time comparison
+	bearerTokenHash = sha256.Sum256([]byte(*bearerToken))
 
 	// Initialize NSQ producer
 	config := nsq.NewConfig()
@@ -42,6 +65,11 @@ func main() {
 		log.Fatalf("Failed to create producer: %v", err)
 	}
 	defer producer.Stop()
+
+	// Start background cleanup for expired messages
+	messageCleanupTicker = time.NewTicker(30 * time.Second)
+	defer messageCleanupTicker.Stop()
+	go cleanupExpiredMessages()
 
 	// Setup HTTP routes with authentication middleware
 	http.HandleFunc("/api/topics/", authMiddleware(handleTopics))
@@ -57,7 +85,24 @@ func main() {
 	}
 }
 
-// authMiddleware validates bearer token
+// cleanupExpiredMessages removes expired messages from the activeMessages map
+func cleanupExpiredMessages() {
+	for range messageCleanupTicker.C {
+		now := time.Now()
+		activeMessagesMutex.Lock()
+		for id, msgWithExpiry := range activeMessages {
+			if now.After(msgWithExpiry.expiry) {
+				// Message expired, requeue it
+				msgWithExpiry.message.Requeue(-1)
+				delete(activeMessages, id)
+				log.Printf("Cleaned up expired message: %s", id)
+			}
+		}
+		activeMessagesMutex.Unlock()
+	}
+}
+
+// authMiddleware validates bearer token using constant-time comparison
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -66,8 +111,16 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		expectedAuth := "Bearer " + *bearerToken
-		if authHeader != expectedAuth {
+		const bearerPrefix = "Bearer "
+		if !strings.HasPrefix(authHeader, bearerPrefix) {
+			http.Error(w, "Invalid bearer token format", http.StatusUnauthorized)
+			return
+		}
+
+		sentToken := authHeader[len(bearerPrefix):]
+		sentTokenHash := sha256.Sum256([]byte(sentToken))
+
+		if subtle.ConstantTimeCompare(sentTokenHash[:], bearerTokenHash[:]) != 1 {
 			http.Error(w, "Invalid bearer token", http.StatusUnauthorized)
 			return
 		}
@@ -208,16 +261,20 @@ func handleConsumers(w http.ResponseWriter, r *http.Request) {
 func handleConsumerStatus(w http.ResponseWriter, r *http.Request, topic, channel string) {
 	consumerKey := fmt.Sprintf("%s:%s", topic, channel)
 
-	consumersMutex.RLock()
-	consumer, exists := consumers[consumerKey]
-	consumersMutex.RUnlock()
+	sharedConsumersMutex.RLock()
+	sc, exists := sharedConsumers[consumerKey]
+	sharedConsumersMutex.RUnlock()
 
 	if !exists {
 		http.Error(w, "Consumer not found", http.StatusNotFound)
 		return
 	}
 
-	stats := consumer.Stats()
+	sc.mu.Lock()
+	clientCount := sc.clientCount
+	sc.mu.Unlock()
+
+	stats := sc.consumer.Stats()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -227,6 +284,7 @@ func handleConsumerStatus(w http.ResponseWriter, r *http.Request, topic, channel
 		"messages":    stats.MessagesReceived,
 		"finished":    stats.MessagesFinished,
 		"requeued":    stats.MessagesRequeued,
+		"clients":     clientCount,
 	})
 }
 
@@ -250,16 +308,16 @@ func handleConsumerRdy(w http.ResponseWriter, r *http.Request, topic, channel st
 
 	consumerKey := fmt.Sprintf("%s:%s", topic, channel)
 
-	consumersMutex.RLock()
-	consumer, exists := consumers[consumerKey]
-	consumersMutex.RUnlock()
+	sharedConsumersMutex.RLock()
+	sc, exists := sharedConsumers[consumerKey]
+	sharedConsumersMutex.RUnlock()
 
 	if !exists {
 		http.Error(w, "Consumer not found for this topic/channel", http.StatusNotFound)
 		return
 	}
 
-	consumer.ChangeMaxInFlight(req.Count)
+	sc.consumer.ChangeMaxInFlight(req.Count)
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -287,7 +345,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	action := parts[1]
 
 	activeMessagesMutex.RLock()
-	msg, exists := activeMessages[messageID]
+	msgWithExpiry, exists := activeMessages[messageID]
 	activeMessagesMutex.RUnlock()
 
 	if !exists {
@@ -295,9 +353,17 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	msg := msgWithExpiry.message
+
 	switch action {
 	case "touch":
 		msg.Touch()
+		// Extend expiry time when touched
+		activeMessagesMutex.Lock()
+		if mwe, ok := activeMessages[messageID]; ok {
+			mwe.expiry = time.Now().Add(messageExpiryDuration)
+		}
+		activeMessagesMutex.Unlock()
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "action": "touched"})
 	case "finish":
@@ -327,14 +393,9 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ConsumerEventRequest structure for starting SSE consumer
-type ConsumerEventRequest struct {
-	Topic   string `json:"topic"`
-	Channel string `json:"channel"`
-}
-
 // handleConsumerEvents handles SSE endpoint for consuming messages
 // GET /api/events?topic=<topic>&channel=<channel>
+// Supports multiple concurrent clients for the same topic/channel pair
 func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -362,61 +423,91 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a channel for messages
-	messageChan := make(chan *nsq.Message, 100)
-
-	// Create consumer
-	config := nsq.NewConfig()
-	consumer, err := nsq.NewConsumer(topic, channel, config)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to create consumer: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	consumerKey := fmt.Sprintf("%s:%s", topic, channel)
 
-	// Store consumer for RDY control
-	consumersMutex.Lock()
-	consumers[consumerKey] = consumer
-	consumersMutex.Unlock()
+	// Get or create shared consumer
+	sharedConsumersMutex.Lock()
+	sc, exists := sharedConsumers[consumerKey]
+	if !exists {
+		// Create new shared consumer
+		config := nsq.NewConfig()
+		consumer, err := nsq.NewConsumer(topic, channel, config)
+		if err != nil {
+			sharedConsumersMutex.Unlock()
+			http.Error(w, fmt.Sprintf("Failed to create consumer: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		sc = &sharedConsumer{
+			consumer:    consumer,
+			messageChan: make(chan *nsq.Message, 1000),
+			clientCount: 0,
+		}
+
+		// Add message handler
+		consumer.AddHandler(nsq.HandlerFunc(func(message *nsq.Message) error {
+			// Store message for lifecycle management
+			messageID := fmt.Sprintf("%s", message.ID)
+			activeMessagesMutex.Lock()
+			activeMessages[messageID] = &messageWithExpiry{
+				message: message,
+				expiry:  time.Now().Add(messageExpiryDuration),
+			}
+			activeMessagesMutex.Unlock()
+
+			// Disable auto-response, let client control lifecycle
+			message.DisableAutoResponse()
+
+			select {
+			case sc.messageChan <- message:
+				return nil
+			default:
+				// Channel full, requeue
+				activeMessagesMutex.Lock()
+				delete(activeMessages, messageID)
+				activeMessagesMutex.Unlock()
+				return fmt.Errorf("message channel full")
+			}
+		}))
+
+		// Connect to NSQd
+		if err := consumer.ConnectToNSQD(*nsqdAddress); err != nil {
+			sharedConsumersMutex.Unlock()
+			http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		sharedConsumers[consumerKey] = sc
+	}
+
+	// Increment client count
+	sc.mu.Lock()
+	sc.clientCount++
+	clientNum := sc.clientCount
+	sc.mu.Unlock()
+	sharedConsumersMutex.Unlock()
+
+	log.Printf("Client #%d connected to %s (total clients: %d)", clientNum, consumerKey, clientNum)
 
 	// Cleanup on disconnect
 	defer func() {
-		consumersMutex.Lock()
-		delete(consumers, consumerKey)
-		consumersMutex.Unlock()
-		consumer.Stop()
-		close(messageChan)
-	}()
+		sharedConsumersMutex.Lock()
+		sc.mu.Lock()
+		sc.clientCount--
+		remainingClients := sc.clientCount
+		sc.mu.Unlock()
 
-	// Add message handler
-	consumer.AddHandler(nsq.HandlerFunc(func(message *nsq.Message) error {
-		// Store message for lifecycle management
-		messageID := fmt.Sprintf("%s", message.ID)
-		activeMessagesMutex.Lock()
-		activeMessages[messageID] = message
-		activeMessagesMutex.Unlock()
+		log.Printf("Client disconnected from %s (remaining clients: %d)", consumerKey, remainingClients)
 
-		// Disable auto-response, let client control lifecycle
-		message.DisableAutoResponse()
-
-		select {
-		case messageChan <- message:
-			return nil
-		default:
-			// Channel full, requeue
-			activeMessagesMutex.Lock()
-			delete(activeMessages, messageID)
-			activeMessagesMutex.Unlock()
-			return fmt.Errorf("message channel full")
+		// If no more clients, stop and remove the consumer
+		if remainingClients == 0 {
+			sc.consumer.Stop()
+			close(sc.messageChan)
+			delete(sharedConsumers, consumerKey)
+			log.Printf("Stopped consumer for %s (no more clients)", consumerKey)
 		}
-	}))
-
-	// Connect to NSQd
-	if err := consumer.ConnectToNSQD(*nsqdAddress); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
-		return
-	}
+		sharedConsumersMutex.Unlock()
+	}()
 
 	// Stream messages as SSE
 	ctx := r.Context()
@@ -425,7 +516,7 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			// Client disconnected
 			return
-		case msg, ok := <-messageChan:
+		case msg, ok := <-sc.messageChan:
 			if !ok {
 				return
 			}
@@ -459,32 +550,20 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 
 // splitPath splits URL path by slashes
 func splitPath(path string) []string {
-	var parts []string
-	for _, part := range []string{} {
-		parts = append(parts, part)
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return []string{}
 	}
-	// Simple split implementation
-	current := ""
-	for _, char := range path {
-		if char == '/' {
-			if current != "" {
-				parts = append(parts, current)
-				current = ""
-			}
-		} else {
-			current += string(char)
-		}
-	}
-	if current != "" {
-		parts = append(parts, current)
-	}
-	return parts
+	return strings.Split(path, "/")
 }
 
 // handleAdmin passes through requests to NSQd admin HTTP API
 func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	// Strip the /admin prefix before proxying to NSQd
+	targetPath := strings.TrimPrefix(r.URL.Path, "/admin")
+
 	// Build the target URL
-	targetURL := fmt.Sprintf("http://%s%s", *nsqdHTTPAddr, r.URL.Path)
+	targetURL := fmt.Sprintf("http://%s%s", *nsqdHTTPAddr, targetPath)
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}

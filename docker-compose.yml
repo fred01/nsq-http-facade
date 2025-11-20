@@ -33,10 +33,8 @@ services:
 
   nsq-http-facade:
     build: .
-    environment:
-      - BEARER_TOKEN=your-secret-token
     command: 
-      - "-bearer-token=your-secret-token"
+      - "-bearer-token=${BEARER_TOKEN:-your-secret-token}"
       - "-nsqd-address=nsqd:4150"
       - "-nsqd-http-address=nsqd:4151"
       - "-http-address=:8080"

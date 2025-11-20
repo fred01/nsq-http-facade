@@ -29,5 +29,5 @@ nsq-http-facade
 *.swo
 *~
 
-# OS
-.DS_Store
+# .env
+.env
