@@ -368,6 +368,9 @@ The integration tests verify:
 
 **RDY Flow Control (TestRDYControl)**:
 - RDY count can be set via API
+- Verifies messages are delivered according to RDY count (e.g., RDY=5 delivers ~5 messages)
+- After finishing messages, more messages are delivered up to RDY limit
+- Tests RDY=0 to pause message delivery
 - Consumer status endpoint returns correct information
 - Flow control applies to all consumers for a topic/channel
 

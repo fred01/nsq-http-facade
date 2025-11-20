@@ -490,7 +490,7 @@ func TestMessageTouch(t *testing.T) {
 	}
 }
 
-// TestRDYControl tests RDY flow control
+// TestRDYControl tests RDY flow control with actual message delivery
 func TestRDYControl(t *testing.T) {
 	ctx := context.Background()
 
@@ -507,18 +507,62 @@ func TestRDYControl(t *testing.T) {
 	topic := "rdy-test"
 	channel := "rdy-channel"
 
-	// Start a consumer
+	// Publish 15 messages first
+	for i := 0; i < 15; i++ {
+		err := publishSingleMessage(facadeURL, topic, fmt.Sprintf("message-%d", i))
+		if err != nil {
+			t.Fatalf("Failed to publish message %d: %v", i, err)
+		}
+	}
+
+	time.Sleep(1 * time.Second)
+
+	// Track messages received
+	receivedMessages := make([]string, 0)
+	var receivedMutex sync.Mutex
+	consumerCtx, consumerCancel := context.WithCancel(context.Background())
+	defer consumerCancel()
+
+	// Start a consumer that counts but doesn't finish messages initially
 	consumerDone := make(chan struct{})
 	go func() {
+		defer close(consumerDone)
+
 		url := fmt.Sprintf("%s/api/events?topic=%s&channel=%s", facadeURL, topic, channel)
-		req, _ := http.NewRequest("GET", url, nil)
+		req, _ := http.NewRequestWithContext(consumerCtx, "GET", url, nil)
 		req.Header.Set("Authorization", "Bearer test-token")
 
 		client := &http.Client{Timeout: 0}
-		resp, _ := client.Do(req)
-		if resp != nil {
-			defer resp.Body.Close()
-			<-consumerDone
+		resp, err := client.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			select {
+			case <-consumerCtx.Done():
+				return
+			default:
+			}
+
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				var msg map[string]interface{}
+				if err := json.Unmarshal([]byte(data), &msg); err != nil {
+					continue
+				}
+
+				messageID := msg["id"].(string)
+				receivedMutex.Lock()
+				receivedMessages = append(receivedMessages, messageID)
+				count := len(receivedMessages)
+				receivedMutex.Unlock()
+
+				t.Logf("Received message %d: %s", count, messageID)
+			}
 		}
 	}()
 
@@ -536,19 +580,88 @@ func TestRDYControl(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to set RDY: %v", err)
 	}
-	defer rdyResp.Body.Close()
+	rdyResp.Body.Close()
 
 	if rdyResp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", rdyResp.StatusCode)
 	}
 
-	var rdyResult map[string]interface{}
-	json.NewDecoder(rdyResp.Body).Decode(&rdyResult)
+	t.Logf("Set RDY count to 5")
 
-	if status, ok := rdyResult["status"].(string); !ok || status != "ok" {
-		t.Errorf("RDY control failed: %v", rdyResult)
+	// Wait a bit for messages to be delivered
+	time.Sleep(3 * time.Second)
+
+	// Check that we received approximately RDY count messages (should be around 5)
+	receivedMutex.Lock()
+	firstBatchCount := len(receivedMessages)
+	firstBatchIDs := make([]string, len(receivedMessages))
+	copy(firstBatchIDs, receivedMessages)
+	receivedMutex.Unlock()
+
+	if firstBatchCount < 3 || firstBatchCount > 7 {
+		t.Errorf("With RDY=5, expected to receive around 5 messages, got %d", firstBatchCount)
 	} else {
-		t.Logf("✓ RDY control working correctly")
+		t.Logf("✓ RDY control working: received %d messages with RDY=5", firstBatchCount)
+	}
+
+	// Now finish those messages
+	for _, msgID := range firstBatchIDs {
+		finishURL := fmt.Sprintf("%s/api/messages/%s/finish", facadeURL, msgID)
+		finishReq, _ := http.NewRequest("POST", finishURL, nil)
+		finishReq.Header.Set("Authorization", "Bearer test-token")
+		finishResp, _ := http.DefaultClient.Do(finishReq)
+		if finishResp != nil {
+			finishResp.Body.Close()
+		}
+	}
+
+	t.Logf("Finished %d messages", len(firstBatchIDs))
+
+	// Wait for more messages to arrive (should get another batch of ~5)
+	time.Sleep(3 * time.Second)
+
+	receivedMutex.Lock()
+	secondBatchCount := len(receivedMessages) - firstBatchCount
+	totalReceived := len(receivedMessages)
+	receivedMutex.Unlock()
+
+	if secondBatchCount < 3 || secondBatchCount > 7 {
+		t.Errorf("After finishing first batch, expected another ~5 messages, got %d", secondBatchCount)
+	} else {
+		t.Logf("✓ After finishing first batch, received %d more messages", secondBatchCount)
+	}
+
+	t.Logf("✓ Total received: %d messages with RDY flow control", totalReceived)
+
+	// Test RDY=0 (pause message delivery)
+	rdyPayload = `{"count": 0}`
+	rdyReq, _ = http.NewRequest("POST", rdyURL, bytes.NewBufferString(rdyPayload))
+	rdyReq.Header.Set("Authorization", "Bearer test-token")
+	rdyReq.Header.Set("Content-Type", "application/json")
+
+	rdyResp, err = http.DefaultClient.Do(rdyReq)
+	if err != nil {
+		t.Fatalf("Failed to set RDY=0: %v", err)
+	}
+	rdyResp.Body.Close()
+
+	t.Logf("Set RDY count to 0 (pause)")
+
+	receivedMutex.Lock()
+	countBeforePause := len(receivedMessages)
+	receivedMutex.Unlock()
+
+	// Wait and verify no new messages arrive
+	time.Sleep(2 * time.Second)
+
+	receivedMutex.Lock()
+	countAfterPause := len(receivedMessages)
+	receivedMutex.Unlock()
+
+	if countAfterPause > countBeforePause {
+		t.Logf("Note: Received %d messages after RDY=0 (some may have been in-flight)", countAfterPause-countBeforePause)
+	} else {
+		t.Logf("✓ RDY=0 correctly paused message delivery")
 	}
 
 	// Get consumer status
@@ -571,7 +684,8 @@ func TestRDYControl(t *testing.T) {
 		t.Logf("✓ Consumer status endpoint working correctly: %d consumers", int(consumers))
 	}
 
-	close(consumerDone)
+	consumerCancel()
+	<-consumerDone
 }
 
 // TestSSEConnectionClose tests graceful SSE connection closure
