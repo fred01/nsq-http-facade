@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  nsqlookupd:
+    image: nsqio/nsq:latest
+    command: /nsqlookupd
+    ports:
+      - "4160:4160"
+      - "4161:4161"
+    networks:
+      - nsq-network
+
+  nsqd:
+    image: nsqio/nsq:latest
+    command: /nsqd --lookupd-tcp-address=nsqlookupd:4160
+    depends_on:
+      - nsqlookupd
+    ports:
+      - "4150:4150"
+      - "4151:4151"
+    networks:
+      - nsq-network
+
+  nsqadmin:
+    image: nsqio/nsq:latest
+    command: /nsqadmin --lookupd-http-address=nsqlookupd:4161
+    depends_on:
+      - nsqlookupd
+    ports:
+      - "4171:4171"
+    networks:
+      - nsq-network
+
+  nsq-http-facade:
+    build: .
+    environment:
+      - BEARER_TOKEN=your-secret-token
+    command: 
+      - "-bearer-token=your-secret-token"
+      - "-nsqd-address=nsqd:4150"
+      - "-nsqd-http-address=nsqd:4151"
+      - "-http-address=:8080"
+    depends_on:
+      - nsqd
+    ports:
+      - "8080:8080"
+    networks:
+      - nsq-network
+
+networks:
+  nsq-network:
+    driver: bridge

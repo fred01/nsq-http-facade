@@ -14,10 +14,45 @@ A simple HTTP REST facade for NSQ (NSQd) written in Go. This service provides HT
 
 ## Installation
 
+### From Source
+
 ```bash
 go get github.com/fred01/nsq-http-facade
 go build -o nsq-http-facade
 ```
+
+### Using Docker
+
+Build the Docker image:
+
+```bash
+docker build -t nsq-http-facade .
+```
+
+Run with Docker:
+
+```bash
+docker run -p 8080:8080 nsq-http-facade \
+  -bearer-token=your-secret-token \
+  -nsqd-address=nsqd:4150 \
+  -nsqd-http-address=nsqd:4151
+```
+
+### Using Docker Compose
+
+The easiest way to get started is using Docker Compose, which sets up NSQ and the HTTP facade:
+
+```bash
+docker-compose up
+```
+
+This will start:
+- NSQ Lookupd (ports 4160, 4161)
+- NSQd (ports 4150, 4151)
+- NSQ Admin (port 4171)
+- NSQ HTTP Facade (port 8080)
+
+Access NSQ Admin UI at: http://localhost:4171
 
 ## Usage
 
@@ -213,6 +248,8 @@ All requests to `/admin/*` are proxied to the NSQd HTTP API. For example:
 - `/admin/ping` → `http://nsqd:4151/ping`
 
 ## Example Usage
+
+See the `examples.sh` script for comprehensive examples of all API endpoints.
 
 ### Publishing a Message
 
