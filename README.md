@@ -320,6 +320,48 @@ All endpoints require authentication via Bearer token. Set a strong token using 
 - **Automatic message expiry**: Messages not processed within 5 minutes are requeued, preventing memory leaks
 - **No default token in Docker**: The Dockerfile requires explicit token configuration
 
+## Testing
+
+### Unit Tests
+
+Run the unit tests:
+```bash
+go test -v -short
+```
+
+Or using Make:
+```bash
+make test
+```
+
+### Integration Tests
+
+The integration tests verify the load balancing behavior using real NSQ containers. These tests require Docker to be running.
+
+Run integration tests:
+```bash
+go test -v -tags=integration -timeout=120s
+```
+
+Or using Make:
+```bash
+make integration-test
+```
+
+The integration test verifies:
+- Messages are distributed across multiple HTTP consumers (load balancing)
+- Each consumer receives at least one message
+- Total messages received equals total messages published
+- Proper message lifecycle management (finish/requeue)
+
+**Integration Test Scenario**:
+1. Starts NSQd in a Docker container
+2. Starts the HTTP facade
+3. Opens 3 HTTP SSE consumer connections
+4. Publishes 300 messages
+5. Verifies all 3 consumers received messages (load balanced)
+6. Verifies total count is exactly 300 messages
+
 ## License
 
 MIT
