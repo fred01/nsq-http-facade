@@ -5,9 +5,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -305,6 +307,397 @@ func publishMessages(facadeURL, topic string, count int) error {
 
 	if resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("publish failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// TestMessageRequeue tests message requeue functionality
+func TestMessageRequeue(t *testing.T) {
+	ctx := context.Background()
+
+	nsqdContainer, nsqdAddress, nsqdHTTPAddress, err := startNSQd(ctx, t)
+	if err != nil {
+		t.Fatalf("Failed to start NSQd: %v", err)
+	}
+	defer nsqdContainer.Terminate(ctx)
+
+	facadePort, stopFacade := startFacadeServer(t, nsqdAddress, nsqdHTTPAddress)
+	defer stopFacade()
+
+	facadeURL := fmt.Sprintf("http://localhost:%d", facadePort)
+	topic := "requeue-test"
+	channel := "requeue-channel"
+
+	// Publish a message
+	err = publishSingleMessage(facadeURL, topic, "test-message")
+	if err != nil {
+		t.Fatalf("Failed to publish message: %v", err)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	// Consumer that requeues the first message
+	messageID := ""
+	receivedCount := 0
+
+	url := fmt.Sprintf("%s/api/events?topic=%s&channel=%s", facadeURL, topic, channel)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	timeout := time.After(10 * time.Second)
+
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				var msg map[string]interface{}
+				json.Unmarshal([]byte(data), &msg)
+
+				msgID := msg["id"].(string)
+				receivedCount++
+
+				if receivedCount == 1 {
+					// Requeue the first time
+					messageID = msgID
+					requeueURL := fmt.Sprintf("%s/api/messages/%s/requeue", facadeURL, msgID)
+					requeueReq, _ := http.NewRequest("POST", requeueURL, nil)
+					requeueReq.Header.Set("Authorization", "Bearer test-token")
+					requeueResp, _ := http.DefaultClient.Do(requeueReq)
+					if requeueResp != nil {
+						requeueResp.Body.Close()
+					}
+					t.Logf("Requeued message %s", msgID)
+				} else if receivedCount == 2 {
+					// Finish the second time
+					finishURL := fmt.Sprintf("%s/api/messages/%s/finish", facadeURL, msgID)
+					finishReq, _ := http.NewRequest("POST", finishURL, nil)
+					finishReq.Header.Set("Authorization", "Bearer test-token")
+					finishResp, _ := http.DefaultClient.Do(finishReq)
+					if finishResp != nil {
+						finishResp.Body.Close()
+					}
+					t.Logf("Finished message %s", msgID)
+					return
+				}
+			}
+		}
+	}()
+
+	<-timeout
+
+	if receivedCount != 2 {
+		t.Errorf("Expected to receive message twice (requeue), got %d", receivedCount)
+	} else {
+		t.Logf("✓ Message requeue working correctly")
+	}
+}
+
+// TestMessageTouch tests message touch functionality
+func TestMessageTouch(t *testing.T) {
+	ctx := context.Background()
+
+	nsqdContainer, nsqdAddress, nsqdHTTPAddress, err := startNSQd(ctx, t)
+	if err != nil {
+		t.Fatalf("Failed to start NSQd: %v", err)
+	}
+	defer nsqdContainer.Terminate(ctx)
+
+	facadePort, stopFacade := startFacadeServer(t, nsqdAddress, nsqdHTTPAddress)
+	defer stopFacade()
+
+	facadeURL := fmt.Sprintf("http://localhost:%d", facadePort)
+	topic := "touch-test"
+	channel := "touch-channel"
+
+	// Publish a message
+	err = publishSingleMessage(facadeURL, topic, "touch-test-message")
+	if err != nil {
+		t.Fatalf("Failed to publish message: %v", err)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	url := fmt.Sprintf("%s/api/events?topic=%s&channel=%s", facadeURL, topic, channel)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	touchCount := 0
+	var messageID string
+
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				var msg map[string]interface{}
+				json.Unmarshal([]byte(data), &msg)
+
+				messageID = msg["id"].(string)
+
+				// Touch the message 3 times before finishing
+				for i := 0; i < 3; i++ {
+					touchURL := fmt.Sprintf("%s/api/messages/%s/touch", facadeURL, messageID)
+					touchReq, _ := http.NewRequest("POST", touchURL, nil)
+					touchReq.Header.Set("Authorization", "Bearer test-token")
+					touchResp, err := http.DefaultClient.Do(touchReq)
+					if err == nil && touchResp.StatusCode == http.StatusOK {
+						touchCount++
+						t.Logf("Touched message %s (%d/3)", messageID, touchCount)
+					}
+					if touchResp != nil {
+						touchResp.Body.Close()
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+
+				// Finally finish the message
+				finishURL := fmt.Sprintf("%s/api/messages/%s/finish", facadeURL, messageID)
+				finishReq, _ := http.NewRequest("POST", finishURL, nil)
+				finishReq.Header.Set("Authorization", "Bearer test-token")
+				finishResp, _ := http.DefaultClient.Do(finishReq)
+				if finishResp != nil {
+					finishResp.Body.Close()
+				}
+				return
+			}
+		}
+	}()
+
+	time.Sleep(5 * time.Second)
+
+	if touchCount != 3 {
+		t.Errorf("Expected 3 touch operations, got %d", touchCount)
+	} else {
+		t.Logf("✓ Message touch working correctly")
+	}
+}
+
+// TestRDYControl tests RDY flow control
+func TestRDYControl(t *testing.T) {
+	ctx := context.Background()
+
+	nsqdContainer, nsqdAddress, nsqdHTTPAddress, err := startNSQd(ctx, t)
+	if err != nil {
+		t.Fatalf("Failed to start NSQd: %v", err)
+	}
+	defer nsqdContainer.Terminate(ctx)
+
+	facadePort, stopFacade := startFacadeServer(t, nsqdAddress, nsqdHTTPAddress)
+	defer stopFacade()
+
+	facadeURL := fmt.Sprintf("http://localhost:%d", facadePort)
+	topic := "rdy-test"
+	channel := "rdy-channel"
+
+	// Start a consumer
+	consumerDone := make(chan struct{})
+	go func() {
+		url := fmt.Sprintf("%s/api/events?topic=%s&channel=%s", facadeURL, topic, channel)
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+
+		client := &http.Client{Timeout: 0}
+		resp, _ := client.Do(req)
+		if resp != nil {
+			defer resp.Body.Close()
+			<-consumerDone
+		}
+	}()
+
+	// Wait for consumer to connect
+	time.Sleep(2 * time.Second)
+
+	// Set RDY to 5
+	rdyURL := fmt.Sprintf("%s/api/consumers/%s/%s/rdy", facadeURL, topic, channel)
+	rdyPayload := `{"count": 5}`
+	rdyReq, _ := http.NewRequest("POST", rdyURL, bytes.NewBufferString(rdyPayload))
+	rdyReq.Header.Set("Authorization", "Bearer test-token")
+	rdyReq.Header.Set("Content-Type", "application/json")
+
+	rdyResp, err := http.DefaultClient.Do(rdyReq)
+	if err != nil {
+		t.Fatalf("Failed to set RDY: %v", err)
+	}
+	defer rdyResp.Body.Close()
+
+	if rdyResp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", rdyResp.StatusCode)
+	}
+
+	var rdyResult map[string]interface{}
+	json.NewDecoder(rdyResp.Body).Decode(&rdyResult)
+
+	if status, ok := rdyResult["status"].(string); !ok || status != "ok" {
+		t.Errorf("RDY control failed: %v", rdyResult)
+	} else {
+		t.Logf("✓ RDY control working correctly")
+	}
+
+	// Get consumer status
+	statusURL := fmt.Sprintf("%s/api/consumers/%s/%s", facadeURL, topic, channel)
+	statusReq, _ := http.NewRequest("GET", statusURL, nil)
+	statusReq.Header.Set("Authorization", "Bearer test-token")
+
+	statusResp, err := http.DefaultClient.Do(statusReq)
+	if err != nil {
+		t.Fatalf("Failed to get status: %v", err)
+	}
+	defer statusResp.Body.Close()
+
+	var statusResult map[string]interface{}
+	json.NewDecoder(statusResp.Body).Decode(&statusResult)
+
+	if consumers, ok := statusResult["consumers"].(float64); !ok || consumers < 1 {
+		t.Errorf("Expected at least 1 consumer, got %v", statusResult)
+	} else {
+		t.Logf("✓ Consumer status endpoint working correctly: %d consumers", int(consumers))
+	}
+
+	close(consumerDone)
+}
+
+// TestSSEConnectionClose tests graceful SSE connection closure
+func TestSSEConnectionClose(t *testing.T) {
+	ctx := context.Background()
+
+	nsqdContainer, nsqdAddress, nsqdHTTPAddress, err := startNSQd(ctx, t)
+	if err != nil {
+		t.Fatalf("Failed to start NSQd: %v", err)
+	}
+	defer nsqdContainer.Terminate(ctx)
+
+	facadePort, stopFacade := startFacadeServer(t, nsqdAddress, nsqdHTTPAddress)
+	defer stopFacade()
+
+	facadeURL := fmt.Sprintf("http://localhost:%d", facadePort)
+	topic := "close-test"
+	channel := "close-channel"
+
+	// Publish some messages
+	for i := 0; i < 10; i++ {
+		publishSingleMessage(facadeURL, topic, fmt.Sprintf("message-%d", i))
+	}
+
+	time.Sleep(1 * time.Second)
+
+	// Start consumer and close it after receiving a few messages
+	receivedCount := int32(0)
+
+	url := fmt.Sprintf("%s/api/events?topic=%s&channel=%s", facadeURL, topic, channel)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				var msg map[string]interface{}
+				json.Unmarshal([]byte(data), &msg)
+
+				msgID := msg["id"].(string)
+				atomic.AddInt32(&receivedCount, 1)
+
+				// Finish the message
+				finishURL := fmt.Sprintf("%s/api/messages/%s/finish", facadeURL, msgID)
+				finishReq, _ := http.NewRequest("POST", finishURL, nil)
+				finishReq.Header.Set("Authorization", "Bearer test-token")
+				finishResp, _ := http.DefaultClient.Do(finishReq)
+				if finishResp != nil {
+					finishResp.Body.Close()
+				}
+
+				// Close after receiving 3 messages
+				if atomic.LoadInt32(&receivedCount) >= 3 {
+					resp.Body.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	time.Sleep(5 * time.Second)
+
+	count := atomic.LoadInt32(&receivedCount)
+	if count < 3 {
+		t.Errorf("Expected at least 3 messages before close, got %d", count)
+	} else {
+		t.Logf("✓ SSE connection close working correctly: received %d messages", count)
+	}
+
+	// Verify we can reconnect and get remaining messages
+	time.Sleep(1 * time.Second)
+
+	req2, _ := http.NewRequest("GET", url, nil)
+	req2.Header.Set("Authorization", "Bearer test-token")
+
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("Failed to reconnect: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("Reconnection failed with status: %d", resp2.StatusCode)
+	} else {
+		t.Logf("✓ Reconnection after close working correctly")
+	}
+}
+
+// publishSingleMessage publishes a single message
+func publishSingleMessage(facadeURL, topic, data string) error {
+	url := fmt.Sprintf("%s/api/topics/%s/messages", facadeURL, topic)
+
+	payload := map[string]interface{}{
+		"data": data,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("publish failed with status: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	return nil

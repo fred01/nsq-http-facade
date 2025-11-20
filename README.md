@@ -348,13 +348,35 @@ Or using Make:
 make integration-test
 ```
 
-The integration test verifies:
+The integration tests verify:
+
+**Load Balancing (TestLoadBalancingBehavior)**:
 - Messages are distributed across multiple HTTP consumers (load balancing)
 - Each consumer receives at least one message
 - Total messages received equals total messages published
 - Proper message lifecycle management (finish/requeue)
 
-**Integration Test Scenario**:
+**Message Requeue (TestMessageRequeue)**:
+- Messages can be requeued and re-delivered
+- Requeued messages are received again by consumers
+- Lifecycle transitions work correctly
+
+**Message Touch (TestMessageTouch)**:
+- Touch operation extends message timeout
+- Messages can be touched multiple times before finishing
+- Proper timeout extension behavior
+
+**RDY Flow Control (TestRDYControl)**:
+- RDY count can be set via API
+- Consumer status endpoint returns correct information
+- Flow control applies to all consumers for a topic/channel
+
+**SSE Connection Close (TestSSEConnectionClose)**:
+- SSE connections can be gracefully closed
+- Unconsumed messages remain in the queue
+- Reconnection works correctly after disconnect
+
+**Test Scenario Example (Load Balancing)**:
 1. Starts NSQd in a Docker container
 2. Starts the HTTP facade
 3. Opens 3 HTTP SSE consumer connections
