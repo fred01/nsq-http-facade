@@ -1,0 +1,683 @@
+openapi: 3.0.3
+info:
+  title: NSQ HTTP Facade API
+  version: 1.0.0
+  description: |
+    A simple HTTP REST facade for NSQ (NSQd) written in Go. This service provides HTTP endpoints to interact with NSQ, including publishing messages, consuming messages via Server-Sent Events (SSE), and controlling message lifecycle.
+    
+    ## Features
+    - REST API for NSQ operations
+    - Producer endpoints (PUB, MPUB) - publish single or multiple messages
+    - Per-client NSQ consumers - each HTTP client gets its own NSQ consumer for native load balancing
+    - Consumer SSE endpoint - consume messages in real-time via Server-Sent Events
+    - Consumer control - RDY flow control for consumers
+    - Message lifecycle management - touch, finish, and requeue messages with automatic expiry
+    - Admin pass-through - proxy requests to NSQd HTTP API
+    - Secure authentication - constant-time bearer token validation to prevent timing attacks
+  contact:
+    name: NSQ HTTP Facade
+    url: https://github.com/fred01/nsq-http-facade
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Producer
+    description: Publishing messages to NSQ topics
+  - name: Consumer
+    description: Consuming messages from NSQ topics/channels
+  - name: Message Lifecycle
+    description: Message lifecycle management (touch, finish, requeue)
+  - name: Admin
+    description: NSQd admin API pass-through
+
+paths:
+  /api/topics/{topic}/messages:
+    post:
+      tags:
+        - Producer
+      summary: Publish single message (PUB)
+      description: Publishes a single message to the specified NSQ topic
+      operationId: publishMessage
+      parameters:
+        - name: topic
+          in: path
+          required: true
+          description: NSQ topic name
+          schema:
+            type: string
+            example: test-topic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Message'
+            example:
+              data: {"hello": "world"}
+      responses:
+        '201':
+          description: Message published successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishResponse'
+              example:
+                status: ok
+                topic: test-topic
+        '400':
+          description: Invalid JSON or bad request
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          description: Failed to publish message
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/topics/{topic}/messages/batch:
+    post:
+      tags:
+        - Producer
+      summary: Publish multiple messages (MPUB)
+      description: Publishes multiple messages to the specified NSQ topic in a single batch
+      operationId: publishMultipleMessages
+      parameters:
+        - name: topic
+          in: path
+          required: true
+          description: NSQ topic name
+          schema:
+            type: string
+            example: test-topic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MultiMessage'
+            example:
+              messages:
+                - "message 1"
+                - "message 2"
+                - "message 3"
+      responses:
+        '201':
+          description: Messages published successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchPublishResponse'
+              example:
+                status: ok
+                topic: test-topic
+                count: 3
+        '400':
+          description: Invalid JSON, bad request, or empty messages array
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          description: Failed to publish messages
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/events:
+    get:
+      tags:
+        - Consumer
+      summary: Consume messages via SSE
+      description: |
+        Opens a Server-Sent Events stream to consume messages from the specified NSQ topic and channel.
+        
+        **Important Notes:**
+        - Messages received via SSE have `DisableAutoResponse()` enabled. You must explicitly finish, requeue, or touch each message using the message lifecycle endpoints.
+        - **Native NSQ load balancing**: Each HTTP client creates its own NSQ consumer. When multiple clients connect to the same topic/channel, NSQ distributes messages across them (one message per consumer), just like native NSQ clients.
+        - This enables horizontal scaling: add more HTTP clients to process messages in parallel.
+      operationId: consumeMessages
+      parameters:
+        - name: topic
+          in: query
+          required: true
+          description: NSQ topic name
+          schema:
+            type: string
+            example: test-topic
+        - name: channel
+          in: query
+          required: true
+          description: NSQ channel name
+          schema:
+            type: string
+            example: test-channel
+      responses:
+        '200':
+          description: |
+            Server-Sent Events stream of messages. Each event contains a JSON-encoded message with the following structure.
+            
+            See the SSEMessage schema for the structure of each message in the stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Stream of SSE events, each containing a JSON-encoded message.
+                  
+                  Example event format:
+                  data: {"id":"12345678","timestamp":1234567890,"attempts":1,"body":"message content"}
+              example: |
+                data: {"id":"12345678","timestamp":1234567890,"attempts":1,"body":"message content"}
+                
+        '400':
+          description: Topic and channel query parameters are required
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          description: Failed to create consumer or connect to NSQd
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/consumers/{topic}/{channel}:
+    get:
+      tags:
+        - Consumer
+      summary: Get consumer status
+      description: Returns aggregated status of all consumers for the specified topic/channel
+      operationId: getConsumerStatus
+      parameters:
+        - name: topic
+          in: path
+          required: true
+          description: NSQ topic name
+          schema:
+            type: string
+            example: test-topic
+        - name: channel
+          in: path
+          required: true
+          description: NSQ channel name
+          schema:
+            type: string
+            example: test-channel
+      responses:
+        '200':
+          description: Consumer status returned successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsumerStatus'
+              example:
+                topic: test-topic
+                channel: test-channel
+                consumers: 3
+                connections: 3
+                messages: 100
+                finished: 95
+                requeued: 5
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: No consumers found for this topic/channel
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/consumers/{topic}/{channel}/rdy:
+    post:
+      tags:
+        - Consumer
+      summary: Set consumer RDY count
+      description: Sets the RDY (ready) count for all consumers of the specified topic/channel. This controls the flow of messages to consumers.
+      operationId: setConsumerRdy
+      parameters:
+        - name: topic
+          in: path
+          required: true
+          description: NSQ topic name
+          schema:
+            type: string
+            example: test-topic
+        - name: channel
+          in: path
+          required: true
+          description: NSQ channel name
+          schema:
+            type: string
+            example: test-channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RdyRequest'
+            example:
+              count: 5
+      responses:
+        '200':
+          description: RDY count set successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RdyResponse'
+              example:
+                status: ok
+                consumers: 2
+        '400':
+          description: Invalid JSON or bad request
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: No consumers found for this topic/channel
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/messages/{messageId}/touch:
+    post:
+      tags:
+        - Message Lifecycle
+      summary: Touch message (extend timeout)
+      description: Extends the timeout for the specified message, preventing it from being requeued
+      operationId: touchMessage
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID returned in the SSE event
+          schema:
+            type: string
+            example: "12345678"
+      responses:
+        '200':
+          description: Message touched successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageActionResponse'
+              example:
+                status: ok
+                action: touched
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Message not found or already processed
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/messages/{messageId}/finish:
+    post:
+      tags:
+        - Message Lifecycle
+      summary: Finish message
+      description: Marks the message as successfully processed and removes it from the queue
+      operationId: finishMessage
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID returned in the SSE event
+          schema:
+            type: string
+            example: "12345678"
+      responses:
+        '200':
+          description: Message finished successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageActionResponse'
+              example:
+                status: ok
+                action: finished
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Message not found or already processed
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/messages/{messageId}/requeue:
+    post:
+      tags:
+        - Message Lifecycle
+      summary: Requeue message
+      description: Requeues the message for redelivery, optionally with a delay
+      operationId: requeueMessage
+      parameters:
+        - name: messageId
+          in: path
+          required: true
+          description: Message ID returned in the SSE event
+          schema:
+            type: string
+            example: "12345678"
+        - name: delay
+          in: query
+          required: false
+          description: Delay in seconds before the message becomes available again. If not specified, the message is requeued immediately.
+          schema:
+            type: integer
+            minimum: 0
+            example: 60
+      responses:
+        '200':
+          description: Message requeued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageActionResponse'
+              example:
+                status: ok
+                action: requeued
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          description: Message not found or already processed
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /admin/{nsqdEndpoint}:
+    get:
+      tags:
+        - Admin
+      summary: Pass-through to NSQd HTTP API (GET)
+      description: Proxies GET requests to the NSQd HTTP API
+      operationId: adminPassThroughGet
+      parameters:
+        - name: nsqdEndpoint
+          in: path
+          required: true
+          description: NSQd endpoint path (e.g., stats, ping)
+          schema:
+            type: string
+            example: stats
+      responses:
+        '200':
+          description: Response from NSQd
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Response varies depending on NSQd endpoint
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          description: Failed to create or execute proxy request
+          content:
+            text/plain:
+              schema:
+                type: string
+        '502':
+          description: Failed to proxy request to NSQd
+          content:
+            text/plain:
+              schema:
+                type: string
+    post:
+      tags:
+        - Admin
+      summary: Pass-through to NSQd HTTP API (POST)
+      description: Proxies POST requests to the NSQd HTTP API
+      operationId: adminPassThroughPost
+      parameters:
+        - name: nsqdEndpoint
+          in: path
+          required: true
+          description: NSQd endpoint path
+          schema:
+            type: string
+            example: topic/create
+      requestBody:
+        description: Request body to forward to NSQd (format depends on endpoint)
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Response from NSQd
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Response varies depending on NSQd endpoint
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          description: Failed to create or execute proxy request
+          content:
+            text/plain:
+              schema:
+                type: string
+        '502':
+          description: Failed to proxy request to NSQd
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Bearer token authentication. Include your token in the Authorization header as "Bearer your-secret-token"
+
+  schemas:
+    Message:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          description: Message content (can be any JSON value)
+          oneOf:
+            - type: object
+            - type: string
+            - type: array
+            - type: number
+            - type: boolean
+      example:
+        data: {"hello": "world"}
+
+    MultiMessage:
+      type: object
+      required:
+        - messages
+      properties:
+        messages:
+          type: array
+          items:
+            description: Message content (can be any JSON value)
+            oneOf:
+              - type: object
+              - type: string
+              - type: array
+              - type: number
+              - type: boolean
+          minItems: 1
+      example:
+        messages:
+          - "message 1"
+          - "message 2"
+          - "message 3"
+
+    PublishResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        topic:
+          type: string
+          example: test-topic
+
+    BatchPublishResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        topic:
+          type: string
+          example: test-topic
+        count:
+          type: integer
+          example: 3
+
+    SSEMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Message ID (used for lifecycle operations)
+          example: "12345678"
+        timestamp:
+          type: integer
+          format: int64
+          description: Message timestamp
+          example: 1234567890
+        attempts:
+          type: integer
+          description: Number of delivery attempts
+          example: 1
+        body:
+          type: string
+          description: Message body content
+          example: "message content"
+
+    ConsumerStatus:
+      type: object
+      properties:
+        topic:
+          type: string
+          description: NSQ topic name
+          example: test-topic
+        channel:
+          type: string
+          description: NSQ channel name
+          example: test-channel
+        consumers:
+          type: integer
+          description: Number of active consumers
+          example: 3
+        connections:
+          type: integer
+          description: Number of NSQ connections
+          example: 3
+        messages:
+          type: integer
+          description: Total messages received
+          example: 100
+        finished:
+          type: integer
+          description: Total messages finished
+          example: 95
+        requeued:
+          type: integer
+          description: Total messages requeued
+          example: 5
+
+    RdyRequest:
+      type: object
+      required:
+        - count
+      properties:
+        count:
+          type: integer
+          description: RDY count (number of messages to receive at once)
+          minimum: 0
+          example: 5
+
+    RdyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        consumers:
+          type: integer
+          description: Number of consumers affected
+          example: 2
+
+    MessageActionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        action:
+          type: string
+          enum:
+            - touched
+            - finished
+            - requeued
+          example: finished
+
+  responses:
+    UnauthorizedError:
+      description: Authentication failed - invalid or missing bearer token
+      content:
+        text/plain:
+          schema:
+            type: string
+          examples:
+            missingToken:
+              value: Authorization header required
+            invalidFormat:
+              value: Invalid bearer token format
+            invalidToken:
+              value: Invalid bearer token

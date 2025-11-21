@@ -82,6 +82,15 @@ Start the HTTP facade:
 - `-nsqd-http-address` - NSQd HTTP address (default: `localhost:4151`)
 - `-http-address` - HTTP server listen address (default: `:8080`)
 
+## API Documentation
+
+Complete API documentation is available in the [OpenAPI specification](openapi.yaml).
+
+You can view the API documentation using any OpenAPI viewer such as:
+- [Swagger Editor](https://editor.swagger.io/) (paste the contents of `openapi.yaml`)
+- [Swagger UI](https://petstore.swagger.io/) (File → Import File → select `openapi.yaml`)
+- [Redoc](https://redocly.github.io/redoc/) for a different viewing experience
+
 ## API Endpoints
 
 All endpoints require Bearer token authentication via the `Authorization` header:
