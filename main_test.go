@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/nsqio/go-nsq"
 )
 
 const testToken = "test-bearer-token"
@@ -335,4 +337,43 @@ func TestHandleMessagesValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestContentTypeHeaders verifies that JSON endpoints return application/json Content-Type
+func TestContentTypeHeaders(t *testing.T) {
+	setupTestEnv()
+
+	t.Run("Consumer status returns JSON Content-Type", func(t *testing.T) {
+		// Create a mock consumer to test successful response
+		consumersMutex.Lock()
+		config := nsq.NewConfig()
+		consumer, err := nsq.NewConsumer("test-topic", "test-channel", config)
+		if err != nil {
+			t.Fatalf("failed to create consumer: %v", err)
+		}
+		consumers["test-topic:test-channel:1"] = consumer
+		consumersMutex.Unlock()
+
+		defer func() {
+			consumersMutex.Lock()
+			delete(consumers, "test-topic:test-channel:1")
+			consumersMutex.Unlock()
+			consumer.Stop()
+		}()
+
+		req := httptest.NewRequest("GET", "/api/consumers/test-topic/test-channel", nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+
+		rr := httptest.NewRecorder()
+		handleConsumerStatus(rr, req, "test-topic", "test-channel")
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
+		}
+
+		contentType := rr.Header().Get("Content-Type")
+		if contentType != "application/json" {
+			t.Errorf("expected Content-Type application/json, got %s", contentType)
+		}
+	})
 }
