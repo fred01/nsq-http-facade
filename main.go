@@ -180,6 +180,7 @@ func handlePub(w http.ResponseWriter, r *http.Request, topic string) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "topic": topic})
 }
@@ -213,6 +214,7 @@ func handleMpub(w http.ResponseWriter, r *http.Request, topic string) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "ok",
@@ -330,6 +332,7 @@ func handleConsumerRdy(w http.ResponseWriter, r *http.Request, topic, channel st
 		consumer.ChangeMaxInFlight(req.Count)
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "ok",
@@ -378,6 +381,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 			mwe.expiry = time.Now().Add(messageExpiryDuration)
 		}
 		activeMessagesMutex.Unlock()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "action": "touched"})
 	case "finish":
@@ -385,6 +389,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		activeMessagesMutex.Lock()
 		delete(activeMessages, messageID)
 		activeMessagesMutex.Unlock()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "action": "finished"})
 	case "requeue":
@@ -400,6 +405,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		activeMessagesMutex.Lock()
 		delete(activeMessages, messageID)
 		activeMessagesMutex.Unlock()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "action": "requeued"})
 	default:
