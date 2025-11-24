@@ -526,7 +526,7 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 				"id":        messageID,
 				"timestamp": msg.Timestamp,
 				"attempts":  msg.Attempts,
-				"body":      string(msg.Body),
+				"body":      json.RawMessage(msg.Body),
 			}
 
 			jsonData, err := json.Marshal(data)
