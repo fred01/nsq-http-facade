@@ -3,6 +3,7 @@ module github.com/fred01/nsq-http-facade
 go 1.24.10
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/nsqio/go-nsq v1.1.0
 	github.com/testcontainers/testcontainers-go v0.40.0
 )

@@ -9,16 +9,28 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/nsqio/go-nsq"
 )
 
+const defaultConfigFile = "/etc/nsq-http-facade/config.toml"
+
+type AppConfig struct {
+	NSQDAddress     string `toml:"nsqd_address"`
+	NSQDHTTPAddress string `toml:"nsqd_http_address"`
+	HTTPAddress     string `toml:"http_address"`
+	BearerToken     string `toml:"bearer_token"`
+}
+
 var (
+	configPath   = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
 	nsqdAddress  = flag.String("nsqd-address", "localhost:4150", "NSQd TCP address")
 	nsqdHTTPAddr = flag.String("nsqd-http-address", "localhost:4151", "NSQd HTTP address")
 	httpAddress  = flag.String("http-address", ":8080", "HTTP server address")
@@ -35,6 +47,98 @@ var (
 	consumerIDCounter     uint64
 )
 
+func envOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+
+	return defaultValue
+}
+
+func defaultAppConfig() AppConfig {
+	return AppConfig{
+		NSQDAddress:     "localhost:4150",
+		NSQDHTTPAddress: "localhost:4151",
+		HTTPAddress:     ":8080",
+	}
+}
+
+func mergeConfig(base *AppConfig, override AppConfig) {
+	if override.NSQDAddress != "" {
+		base.NSQDAddress = override.NSQDAddress
+	}
+
+	if override.NSQDHTTPAddress != "" {
+		base.NSQDHTTPAddress = override.NSQDHTTPAddress
+	}
+
+	if override.HTTPAddress != "" {
+		base.HTTPAddress = override.HTTPAddress
+	}
+
+	if override.BearerToken != "" {
+		base.BearerToken = override.BearerToken
+	}
+}
+
+func loadConfigFile(path string) (AppConfig, bool, error) {
+	var cfg AppConfig
+
+	if path == "" {
+		return cfg, false, nil
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return cfg, false, nil
+		}
+
+		return cfg, false, err
+	}
+
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return cfg, true, err
+	}
+
+	return cfg, true, nil
+}
+
+func applyEnvOverrides(cfg *AppConfig) {
+	if value := os.Getenv("NSQ_HTTP_FACADE_NSQD_ADDRESS"); value != "" {
+		cfg.NSQDAddress = value
+	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_NSQD_HTTP_ADDRESS"); value != "" {
+		cfg.NSQDHTTPAddress = value
+	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_HTTP_ADDRESS"); value != "" {
+		cfg.HTTPAddress = value
+	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_BEARER_TOKEN"); value != "" {
+		cfg.BearerToken = value
+	}
+}
+
+func applyCLIOverrides(cfg *AppConfig, visited map[string]bool) {
+	if visited["nsqd-address"] {
+		cfg.NSQDAddress = *nsqdAddress
+	}
+
+	if visited["nsqd-http-address"] {
+		cfg.NSQDHTTPAddress = *nsqdHTTPAddr
+	}
+
+	if visited["http-address"] {
+		cfg.HTTPAddress = *httpAddress
+	}
+
+	if visited["bearer-token"] {
+		cfg.BearerToken = *bearerToken
+	}
+}
+
 // messageWithExpiry wraps an NSQ message with an expiry time
 type messageWithExpiry struct {
 	message *nsq.Message
@@ -44,6 +148,30 @@ type messageWithExpiry struct {
 func main() {
 	flag.Parse()
 
+	visitedFlags := map[string]bool{}
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		visitedFlags[f.Name] = true
+	})
+
+	config := defaultAppConfig()
+	fileConfig, loaded, err := loadConfigFile(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config file %s: %v", *configPath, err)
+	}
+
+	if loaded {
+		log.Printf("Loaded configuration from %s", *configPath)
+	}
+
+	mergeConfig(&config, fileConfig)
+	applyEnvOverrides(&config)
+	applyCLIOverrides(&config, visitedFlags)
+
+	*nsqdAddress = config.NSQDAddress
+	*nsqdHTTPAddr = config.NSQDHTTPAddress
+	*httpAddress = config.HTTPAddress
+	*bearerToken = config.BearerToken
+
 	if *bearerToken == "" {
 		log.Fatalf("Bearer token is required. Use -bearer-token flag")
 	}
@@ -52,9 +180,8 @@ func main() {
 	bearerTokenHash = sha256.Sum256([]byte(*bearerToken))
 
 	// Initialize NSQ producer
-	config := nsq.NewConfig()
-	var err error
-	producer, err = nsq.NewProducer(*nsqdAddress, config)
+	nsqConfig := nsq.NewConfig()
+	producer, err = nsq.NewProducer(*nsqdAddress, nsqConfig)
 	if err != nil {
 		log.Fatalf("Failed to create producer: %v", err)
 	}
