@@ -89,6 +89,14 @@ All runtime parameters are required; the process exits if any are missing. Confi
 
 Copy `config.toml.example` to your preferred path and fill in all values to bootstrap configuration quickly.
 
+#### Example TOML Configuration
+```toml
+nsqd_address = "localhost:4150"
+nsqd_http_address = "localhost:4151"
+http_address = ":8080"
+bearer_token = "your-secret-token"
+```
+
 ### Command-line Flags
 
 - `-config` - Path to a TOML configuration file (default: `/etc/nsq-http-facade/config.toml`)
