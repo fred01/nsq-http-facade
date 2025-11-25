@@ -80,16 +80,12 @@ func loadConfigFile(path string) (AppConfig, bool, error) {
 		return cfg, false, nil
 	}
 
-	if _, err := os.Stat(path); err != nil {
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		if os.IsNotExist(err) {
 			return cfg, false, nil
 		}
 
 		return cfg, false, err
-	}
-
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return cfg, true, err
 	}
 
 	return cfg, true, nil
@@ -185,9 +181,9 @@ func main() {
 	applyEnvOverrides(&config)
 	applyCLIOverrides(&config, visitedFlags)
 
-        if err := validateConfig(config); err != nil {
-                log.Fatalf("%v", err)
-        }
+	if err := validateConfig(config); err != nil {
+		log.Fatalf("%v", err)
+	}
 
 	*nsqdAddress = config.NSQDAddress
 	*nsqdHTTPAddr = config.NSQDHTTPAddress

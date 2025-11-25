@@ -54,8 +54,8 @@ bearer_token = "file-token"
 		t.Fatalf("expected error for malformed config file")
 	}
 
-	if !loaded {
-		t.Fatalf("expected malformed config file attempt to be reported as loaded")
+	if loaded {
+		t.Fatalf("expected malformed config file to be treated as not loaded")
 	}
 }
 
