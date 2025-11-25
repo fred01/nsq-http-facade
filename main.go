@@ -9,21 +9,34 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/nsqio/go-nsq"
 )
 
+const defaultConfigFile = "/etc/nsq-http-facade/config.toml"
+
+type AppConfig struct {
+	NSQDAddress     string `toml:"nsqd_address"`
+	NSQDHTTPAddress string `toml:"nsqd_http_address"`
+	HTTPAddress     string `toml:"http_address"`
+	BearerToken     string `toml:"bearer_token"`
+}
+
 var (
-	nsqdAddress  = flag.String("nsqd-address", "localhost:4150", "NSQd TCP address")
-	nsqdHTTPAddr = flag.String("nsqd-http-address", "localhost:4151", "NSQd HTTP address")
-	httpAddress  = flag.String("http-address", ":8080", "HTTP server address")
+	configPath   = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
+	nsqdAddress  = flag.String("nsqd-address", "", "NSQd TCP address (required)")
+	nsqdHTTPAddr = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
+	httpAddress  = flag.String("http-address", "", "HTTP server address (required)")
 	bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
 
+	finalConfig           AppConfig
 	producer              *nsq.Producer
 	consumers             = make(map[string]*nsq.Consumer)
 	consumersMutex        sync.RWMutex
@@ -35,6 +48,112 @@ var (
 	consumerIDCounter     uint64
 )
 
+func envOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+
+	return defaultValue
+}
+
+func mergeConfig(base *AppConfig, override AppConfig) {
+	if override.NSQDAddress != "" {
+		base.NSQDAddress = override.NSQDAddress
+	}
+
+	if override.NSQDHTTPAddress != "" {
+		base.NSQDHTTPAddress = override.NSQDHTTPAddress
+	}
+
+	if override.HTTPAddress != "" {
+		base.HTTPAddress = override.HTTPAddress
+	}
+
+	if override.BearerToken != "" {
+		base.BearerToken = override.BearerToken
+	}
+}
+
+func loadConfigFile(path string) (AppConfig, bool, error) {
+	var cfg AppConfig
+
+	if path == "" {
+		return cfg, false, nil
+	}
+
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		if os.IsNotExist(err) {
+			return cfg, false, nil
+		}
+
+		return cfg, false, err
+	}
+
+	return cfg, true, nil
+}
+
+func applyEnvOverrides(cfg *AppConfig) {
+	if value := os.Getenv("NSQ_HTTP_FACADE_NSQD_ADDRESS"); value != "" {
+		cfg.NSQDAddress = value
+	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_NSQD_HTTP_ADDRESS"); value != "" {
+		cfg.NSQDHTTPAddress = value
+	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_HTTP_ADDRESS"); value != "" {
+		cfg.HTTPAddress = value
+	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_BEARER_TOKEN"); value != "" {
+		cfg.BearerToken = value
+	}
+}
+
+func applyCLIOverrides(cfg *AppConfig, visited map[string]bool) {
+	if visited["nsqd-address"] {
+		cfg.NSQDAddress = *nsqdAddress
+	}
+
+	if visited["nsqd-http-address"] {
+		cfg.NSQDHTTPAddress = *nsqdHTTPAddr
+	}
+
+	if visited["http-address"] {
+		cfg.HTTPAddress = *httpAddress
+	}
+
+	if visited["bearer-token"] {
+		cfg.BearerToken = *bearerToken
+	}
+}
+
+func validateConfig(cfg AppConfig) error {
+	var missing []string
+
+	if cfg.NSQDAddress == "" {
+		missing = append(missing, "nsqd_address")
+	}
+
+	if cfg.NSQDHTTPAddress == "" {
+		missing = append(missing, "nsqd_http_address")
+	}
+
+	if cfg.HTTPAddress == "" {
+		missing = append(missing, "http_address")
+	}
+
+	if cfg.BearerToken == "" {
+		missing = append(missing, "bearer_token")
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required configuration values: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
+}
+
 // messageWithExpiry wraps an NSQ message with an expiry time
 type messageWithExpiry struct {
 	message *nsq.Message
@@ -44,17 +163,41 @@ type messageWithExpiry struct {
 func main() {
 	flag.Parse()
 
-	if *bearerToken == "" {
-		log.Fatalf("Bearer token is required. Use -bearer-token flag")
+	visitedFlags := map[string]bool{}
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		visitedFlags[f.Name] = true
+	})
+
+	var config AppConfig
+	fileConfig, loaded, err := loadConfigFile(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config file %s: %v", *configPath, err)
 	}
 
+	if loaded {
+		log.Printf("Loaded configuration from %s", *configPath)
+	}
+
+	mergeConfig(&config, fileConfig)
+	applyEnvOverrides(&config)
+	applyCLIOverrides(&config, visitedFlags)
+
+	if err := validateConfig(config); err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	finalConfig = config
 	// Pre-calculate bearer token hash for constant-time comparison
-	bearerTokenHash = sha256.Sum256([]byte(*bearerToken))
+	bearerTokenHash = sha256.Sum256([]byte(finalConfig.BearerToken))
+
+	// Clear plaintext bearer token copies after hashing to limit exposure
+	config.BearerToken = ""
+	finalConfig.BearerToken = ""
+	*bearerToken = ""
 
 	// Initialize NSQ producer
-	config := nsq.NewConfig()
-	var err error
-	producer, err = nsq.NewProducer(*nsqdAddress, config)
+	nsqConfig := nsq.NewConfig()
+	producer, err = nsq.NewProducer(finalConfig.NSQDAddress, nsqConfig)
 	if err != nil {
 		log.Fatalf("Failed to create producer: %v", err)
 	}
@@ -72,9 +215,9 @@ func main() {
 	http.HandleFunc("/api/events", authMiddleware(handleConsumerEvents))
 	http.HandleFunc("/admin/", authMiddleware(handleAdmin))
 
-	log.Printf("Starting HTTP server on %s", *httpAddress)
-	log.Printf("Connected to NSQd at %s", *nsqdAddress)
-	if err := http.ListenAndServe(*httpAddress, nil); err != nil {
+	log.Printf("Starting HTTP server on %s", finalConfig.HTTPAddress)
+	log.Printf("Connected to NSQd at %s", finalConfig.NSQDAddress)
+	if err := http.ListenAndServe(finalConfig.HTTPAddress, nil); err != nil {
 		log.Fatalf("Failed to start HTTP server: %v", err)
 	}
 }
@@ -500,7 +643,7 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 	}))
 
 	// Connect to NSQd
-	if err := consumer.ConnectToNSQD(*nsqdAddress); err != nil {
+	if err := consumer.ConnectToNSQD(finalConfig.NSQDAddress); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -561,7 +704,7 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	targetPath := strings.TrimPrefix(r.URL.Path, "/admin")
 
 	// Build the target URL
-	targetURL := fmt.Sprintf("http://%s%s", *nsqdHTTPAddr, targetPath)
+	targetURL := fmt.Sprintf("http://%s%s", finalConfig.NSQDHTTPAddress, targetPath)
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}

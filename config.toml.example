@@ -1,0 +1,8 @@
+# Sample configuration for nsq-http-facade
+# Copy this file to /etc/nsq-http-facade/config.toml or supply via -config
+# All values are required.
+
+nsqd_address = "localhost:4150"
+nsqd_http_address = "localhost:4151"
+http_address = ":8080"
+bearer_token = "change-me"

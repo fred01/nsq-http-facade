@@ -75,12 +75,35 @@ Start the HTTP facade:
 ./nsq-http-facade -bearer-token=your-secret-token
 ```
 
+### Configuration
+
+All runtime parameters are required; the process exits if any are missing. Configuration is resolved in the following order (later entries override earlier ones):
+
+1. TOML config file (`/etc/nsq-http-facade/config.toml` by default, override with `-config` or `NSQ_HTTP_FACADE_CONFIG`).
+2. Environment variables:
+   - `NSQ_HTTP_FACADE_NSQD_ADDRESS`
+   - `NSQ_HTTP_FACADE_NSQD_HTTP_ADDRESS`
+   - `NSQ_HTTP_FACADE_HTTP_ADDRESS`
+   - `NSQ_HTTP_FACADE_BEARER_TOKEN`
+3. Command-line flags.
+
+Copy `config.toml.example` to your preferred path and fill in all values to bootstrap configuration quickly.
+
+#### Example TOML Configuration
+```toml
+nsqd_address = "localhost:4150"
+nsqd_http_address = "localhost:4151"
+http_address = ":8080"
+bearer_token = "your-secret-token"
+```
+
 ### Command-line Flags
 
+- `-config` - Path to a TOML configuration file (default: `/etc/nsq-http-facade/config.toml`)
 - `-bearer-token` - Bearer token for authentication (required)
-- `-nsqd-address` - NSQd TCP address (default: `localhost:4150`)
-- `-nsqd-http-address` - NSQd HTTP address (default: `localhost:4151`)
-- `-http-address` - HTTP server listen address (default: `:8080`)
+- `-nsqd-address` - NSQd TCP address (required)
+- `-nsqd-http-address` - NSQd HTTP address (required)
+- `-http-address` - HTTP server listen address (required)
 
 ## API Documentation
 
