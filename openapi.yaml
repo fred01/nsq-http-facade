@@ -151,7 +151,7 @@ paths:
         - Messages received via SSE have `DisableAutoResponse()` enabled. You must explicitly finish, requeue, or touch each message using the message lifecycle endpoints.
         - **Native NSQ load balancing**: Each HTTP client creates its own NSQ consumer. When multiple clients connect to the same topic/channel, NSQ distributes messages across them (one message per consumer), just like native NSQ clients.
         - This enables horizontal scaling: add more HTTP clients to process messages in parallel.
-        - **Keepalive**: The server sends SSE comment lines (`: keepalive`) at a configurable interval (default: 60 seconds) to keep the connection alive. This can be configured via `keepalive_interval` setting or disabled by setting it to a negative value.
+        - **Keepalive**: The server sends SSE comment lines (`: keepalive`) at a configurable interval (default: 60 seconds) to keep the connection alive. This can be configured via `sse_keepalive_interval_sec` setting or disabled by setting it to a negative value.
       operationId: consumeMessages
       parameters:
         - name: topic

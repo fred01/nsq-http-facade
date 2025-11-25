@@ -128,14 +128,14 @@ func TestValidateConfig(t *testing.T) {
 func TestKeepaliveIntervalConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	t.Run("Load keepalive_interval from config file", func(t *testing.T) {
+	t.Run("Load sse_keepalive_interval_sec from config file", func(t *testing.T) {
 		configPath := filepath.Join(tmpDir, "config_keepalive.toml")
 		content := []byte(`
 nsqd_address = "file:4150"
 nsqd_http_address = "file:4151"
 http_address = ":8081"
 bearer_token = "file-token"
-keepalive_interval = 30
+sse_keepalive_interval_sec = 30
 `)
 		if err := os.WriteFile(configPath, content, 0o600); err != nil {
 			t.Fatalf("failed to write config file: %v", err)
@@ -150,51 +150,51 @@ keepalive_interval = 30
 			t.Fatalf("expected config to be loaded")
 		}
 
-		if cfg.KeepaliveInterval != 30 {
-			t.Fatalf("expected keepalive_interval 30, got %d", cfg.KeepaliveInterval)
+		if cfg.SSEKeepaliveIntervalSec != 30 {
+			t.Fatalf("expected sse_keepalive_interval_sec 30, got %d", cfg.SSEKeepaliveIntervalSec)
 		}
 	})
 
-	t.Run("mergeConfig with keepalive_interval", func(t *testing.T) {
+	t.Run("mergeConfig with sse_keepalive_interval_sec", func(t *testing.T) {
 		base := AppConfig{}
-		mergeConfig(&base, AppConfig{KeepaliveInterval: 45})
+		mergeConfig(&base, AppConfig{SSEKeepaliveIntervalSec: 45})
 
-		if base.KeepaliveInterval != 45 {
-			t.Fatalf("expected keepalive_interval 45, got %d", base.KeepaliveInterval)
+		if base.SSEKeepaliveIntervalSec != 45 {
+			t.Fatalf("expected sse_keepalive_interval_sec 45, got %d", base.SSEKeepaliveIntervalSec)
 		}
 
 		// mergeConfig should not override with zero value
-		mergeConfig(&base, AppConfig{KeepaliveInterval: 0})
-		if base.KeepaliveInterval != 45 {
-			t.Fatalf("expected keepalive_interval to remain 45, got %d", base.KeepaliveInterval)
+		mergeConfig(&base, AppConfig{SSEKeepaliveIntervalSec: 0})
+		if base.SSEKeepaliveIntervalSec != 45 {
+			t.Fatalf("expected sse_keepalive_interval_sec to remain 45, got %d", base.SSEKeepaliveIntervalSec)
 		}
 	})
 
-	t.Run("applyEnvOverrides with keepalive_interval", func(t *testing.T) {
+	t.Run("applyEnvOverrides with sse_keepalive_interval_sec", func(t *testing.T) {
 		cfg := AppConfig{}
-		t.Setenv("NSQ_HTTP_FACADE_KEEPALIVE_INTERVAL", "120")
+		t.Setenv("NSQ_HTTP_FACADE_SSE_KEEPALIVE_INTERVAL_SEC", "120")
 		applyEnvOverrides(&cfg)
 
-		if cfg.KeepaliveInterval != 120 {
-			t.Fatalf("expected keepalive_interval 120 from env, got %d", cfg.KeepaliveInterval)
+		if cfg.SSEKeepaliveIntervalSec != 120 {
+			t.Fatalf("expected sse_keepalive_interval_sec 120 from env, got %d", cfg.SSEKeepaliveIntervalSec)
 		}
 	})
 
-	t.Run("applyCLIOverrides with keepalive_interval", func(t *testing.T) {
-		cfg := AppConfig{KeepaliveInterval: 60}
+	t.Run("applyCLIOverrides with sse_keepalive_interval_sec", func(t *testing.T) {
+		cfg := AppConfig{SSEKeepaliveIntervalSec: 60}
 
-		originalKeepaliveInterval := *keepaliveInterval
+		originalSSEKeepaliveIntervalSec := *sseKeepaliveIntervalSec
 		defer func() {
-			*keepaliveInterval = originalKeepaliveInterval
+			*sseKeepaliveIntervalSec = originalSSEKeepaliveIntervalSec
 		}()
 
-		*keepaliveInterval = 90
-		visited := map[string]bool{"keepalive-interval": true}
+		*sseKeepaliveIntervalSec = 90
+		visited := map[string]bool{"sse-keepalive-interval-sec": true}
 
 		applyCLIOverrides(&cfg, visited)
 
-		if cfg.KeepaliveInterval != 90 {
-			t.Fatalf("expected keepalive_interval 90 from CLI, got %d", cfg.KeepaliveInterval)
+		if cfg.SSEKeepaliveIntervalSec != 90 {
+			t.Fatalf("expected sse_keepalive_interval_sec 90 from CLI, got %d", cfg.SSEKeepaliveIntervalSec)
 		}
 	})
 }

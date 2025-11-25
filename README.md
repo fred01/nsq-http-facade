@@ -86,7 +86,7 @@ All runtime parameters are required; the process exits if any are missing. Confi
    - `NSQ_HTTP_FACADE_NSQD_HTTP_ADDRESS`
    - `NSQ_HTTP_FACADE_HTTP_ADDRESS`
    - `NSQ_HTTP_FACADE_BEARER_TOKEN`
-   - `NSQ_HTTP_FACADE_KEEPALIVE_INTERVAL`
+   - `NSQ_HTTP_FACADE_SSE_KEEPALIVE_INTERVAL_SEC`
 3. Command-line flags.
 
 Copy `config.toml.example` to your preferred path and fill in all values to bootstrap configuration quickly.
@@ -97,7 +97,7 @@ nsqd_address = "localhost:4150"
 nsqd_http_address = "localhost:4151"
 http_address = ":8080"
 bearer_token = "your-secret-token"
-# keepalive_interval = 60  # SSE keepalive interval in seconds (default: 60, negative to disable)
+# sse_keepalive_interval_sec = 60  # SSE keepalive interval in seconds (default: 60, negative to disable)
 ```
 
 ### Command-line Flags
@@ -107,7 +107,7 @@ bearer_token = "your-secret-token"
 - `-nsqd-address` - NSQd TCP address (required)
 - `-nsqd-http-address` - NSQd HTTP address (required)
 - `-http-address` - HTTP server listen address (required)
-- `-keepalive-interval` - Keepalive interval in seconds for SSE consumers (default: 60, negative to disable)
+- `-sse-keepalive-interval-sec` - SSE keepalive interval in seconds for consumers (default: 60, negative to disable)
 
 ## API Documentation
 

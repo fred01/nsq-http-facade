@@ -21,14 +21,14 @@ import (
 )
 
 const defaultConfigFile = "/etc/nsq-http-facade/config.toml"
-const defaultKeepaliveInterval = 60 // seconds
+const defaultSSEKeepaliveIntervalSec = 60 // seconds
 
 type AppConfig struct {
-	NSQDAddress       string `toml:"nsqd_address"`
-	NSQDHTTPAddress   string `toml:"nsqd_http_address"`
-	HTTPAddress       string `toml:"http_address"`
-	BearerToken       string `toml:"bearer_token"`
-	KeepaliveInterval int    `toml:"keepalive_interval"` // in seconds, negative to disable
+	NSQDAddress              string `toml:"nsqd_address"`
+	NSQDHTTPAddress          string `toml:"nsqd_http_address"`
+	HTTPAddress              string `toml:"http_address"`
+	BearerToken              string `toml:"bearer_token"`
+	SSEKeepaliveIntervalSec  int    `toml:"sse_keepalive_interval_sec"` // in seconds, negative to disable
 }
 
 var (
@@ -37,7 +37,7 @@ var (
 	nsqdHTTPAddr      = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
 	httpAddress       = flag.String("http-address", "", "HTTP server address (required)")
 	bearerToken       = flag.String("bearer-token", "", "Bearer token for authentication (required)")
-	keepaliveInterval = flag.Int("keepalive-interval", 0, "Keepalive interval in seconds for SSE consumers (default: 60, negative to disable)")
+	sseKeepaliveIntervalSec = flag.Int("sse-keepalive-interval-sec", 0, "SSE keepalive interval in seconds for consumers (default: 60, negative to disable)")
 
 	finalConfig           AppConfig
 	producer              *nsq.Producer
@@ -76,8 +76,8 @@ func mergeConfig(base *AppConfig, override AppConfig) {
 		base.BearerToken = override.BearerToken
 	}
 
-	if override.KeepaliveInterval != 0 {
-		base.KeepaliveInterval = override.KeepaliveInterval
+	if override.SSEKeepaliveIntervalSec != 0 {
+		base.SSEKeepaliveIntervalSec = override.SSEKeepaliveIntervalSec
 	}
 }
 
@@ -116,9 +116,9 @@ func applyEnvOverrides(cfg *AppConfig) {
 		cfg.BearerToken = value
 	}
 
-	if value := os.Getenv("NSQ_HTTP_FACADE_KEEPALIVE_INTERVAL"); value != "" {
+	if value := os.Getenv("NSQ_HTTP_FACADE_SSE_KEEPALIVE_INTERVAL_SEC"); value != "" {
 		if interval, err := strconv.Atoi(value); err == nil {
-			cfg.KeepaliveInterval = interval
+			cfg.SSEKeepaliveIntervalSec = interval
 		}
 	}
 }
@@ -140,8 +140,8 @@ func applyCLIOverrides(cfg *AppConfig, visited map[string]bool) {
 		cfg.BearerToken = *bearerToken
 	}
 
-	if visited["keepalive-interval"] {
-		cfg.KeepaliveInterval = *keepaliveInterval
+	if visited["sse-keepalive-interval-sec"] {
+		cfg.SSEKeepaliveIntervalSec = *sseKeepaliveIntervalSec
 	}
 }
 
@@ -203,9 +203,9 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	// Set default keepalive interval if not configured
-	if config.KeepaliveInterval == 0 {
-		config.KeepaliveInterval = defaultKeepaliveInterval
+	// Set default SSE keepalive interval if not configured
+	if config.SSEKeepaliveIntervalSec == 0 {
+		config.SSEKeepaliveIntervalSec = defaultSSEKeepaliveIntervalSec
 	}
 
 	finalConfig = config
@@ -677,8 +677,8 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 	// and nil channels are never selected in Go select statements.
 	var keepaliveTicker *time.Ticker
 	var keepaliveChan <-chan time.Time
-	if finalConfig.KeepaliveInterval > 0 {
-		keepaliveTicker = time.NewTicker(time.Duration(finalConfig.KeepaliveInterval) * time.Second)
+	if finalConfig.SSEKeepaliveIntervalSec > 0 {
+		keepaliveTicker = time.NewTicker(time.Duration(finalConfig.SSEKeepaliveIntervalSec) * time.Second)
 		keepaliveChan = keepaliveTicker.C
 		defer keepaliveTicker.Stop()
 	}
