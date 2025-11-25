@@ -30,18 +30,18 @@ type AppConfig struct {
 }
 
 var (
-        configPath   = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
-        nsqdAddress  = flag.String("nsqd-address", "", "NSQd TCP address (required)")
-        nsqdHTTPAddr = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
-        httpAddress  = flag.String("http-address", "", "HTTP server address (required)")
-        bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
+	configPath   = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
+	nsqdAddress  = flag.String("nsqd-address", "", "NSQd TCP address (required)")
+	nsqdHTTPAddr = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
+	httpAddress  = flag.String("http-address", "", "HTTP server address (required)")
+	bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
 
-        finalConfig           AppConfig
-        producer              *nsq.Producer
-        consumers             = make(map[string]*nsq.Consumer)
-        consumersMutex        sync.RWMutex
-        activeMessages        = make(map[string]*messageWithExpiry)
-        activeMessagesMutex   sync.RWMutex
+	finalConfig           AppConfig
+	producer              *nsq.Producer
+	consumers             = make(map[string]*nsq.Consumer)
+	consumersMutex        sync.RWMutex
+	activeMessages        = make(map[string]*messageWithExpiry)
+	activeMessagesMutex   sync.RWMutex
 	bearerTokenHash       [32]byte
 	messageCleanupTicker  *time.Ticker
 	messageExpiryDuration = 5 * time.Minute
@@ -168,11 +168,11 @@ func main() {
 		visitedFlags[f.Name] = true
 	})
 
-        var config AppConfig
-        fileConfig, loaded, err := loadConfigFile(*configPath)
-        if err != nil {
-                log.Fatalf("Failed to load config file %s: %v", *configPath, err)
-        }
+	var config AppConfig
+	fileConfig, loaded, err := loadConfigFile(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config file %s: %v", *configPath, err)
+	}
 
 	if loaded {
 		log.Printf("Loaded configuration from %s", *configPath)
@@ -182,20 +182,25 @@ func main() {
 	applyEnvOverrides(&config)
 	applyCLIOverrides(&config, visitedFlags)
 
-        if err := validateConfig(config); err != nil {
-                log.Fatalf("%v", err)
-        }
+	if err := validateConfig(config); err != nil {
+		log.Fatalf("%v", err)
+	}
 
-        finalConfig = config
-        // Pre-calculate bearer token hash for constant-time comparison
-        bearerTokenHash = sha256.Sum256([]byte(finalConfig.BearerToken))
+	finalConfig = config
+	// Pre-calculate bearer token hash for constant-time comparison
+	bearerTokenHash = sha256.Sum256([]byte(finalConfig.BearerToken))
 
-        // Initialize NSQ producer
-        nsqConfig := nsq.NewConfig()
-        producer, err = nsq.NewProducer(finalConfig.NSQDAddress, nsqConfig)
-        if err != nil {
-                log.Fatalf("Failed to create producer: %v", err)
-        }
+	// Clear plaintext bearer token copies after hashing to limit exposure
+	config.BearerToken = ""
+	finalConfig.BearerToken = ""
+	*bearerToken = ""
+
+	// Initialize NSQ producer
+	nsqConfig := nsq.NewConfig()
+	producer, err = nsq.NewProducer(finalConfig.NSQDAddress, nsqConfig)
+	if err != nil {
+		log.Fatalf("Failed to create producer: %v", err)
+	}
 	defer producer.Stop()
 
 	// Start background cleanup for expired messages
@@ -210,11 +215,11 @@ func main() {
 	http.HandleFunc("/api/events", authMiddleware(handleConsumerEvents))
 	http.HandleFunc("/admin/", authMiddleware(handleAdmin))
 
-        log.Printf("Starting HTTP server on %s", finalConfig.HTTPAddress)
-        log.Printf("Connected to NSQd at %s", finalConfig.NSQDAddress)
-        if err := http.ListenAndServe(finalConfig.HTTPAddress, nil); err != nil {
-                log.Fatalf("Failed to start HTTP server: %v", err)
-        }
+	log.Printf("Starting HTTP server on %s", finalConfig.HTTPAddress)
+	log.Printf("Connected to NSQd at %s", finalConfig.NSQDAddress)
+	if err := http.ListenAndServe(finalConfig.HTTPAddress, nil); err != nil {
+		log.Fatalf("Failed to start HTTP server: %v", err)
+	}
 }
 
 // cleanupExpiredMessages removes expired messages from the activeMessages map
@@ -638,10 +643,10 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 	}))
 
 	// Connect to NSQd
-        if err := consumer.ConnectToNSQD(finalConfig.NSQDAddress); err != nil {
-                http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
-                return
-        }
+	if err := consumer.ConnectToNSQD(finalConfig.NSQDAddress); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to connect to NSQd: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	log.Printf("Consumer %s connected for topic=%s channel=%s", consumerKey, topic, channel)
 
@@ -699,7 +704,7 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	targetPath := strings.TrimPrefix(r.URL.Path, "/admin")
 
 	// Build the target URL
-        targetURL := fmt.Sprintf("http://%s%s", finalConfig.NSQDHTTPAddress, targetPath)
+	targetURL := fmt.Sprintf("http://%s%s", finalConfig.NSQDHTTPAddress, targetPath)
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
