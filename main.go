@@ -28,7 +28,7 @@ type AppConfig struct {
 	NSQDHTTPAddress   string `toml:"nsqd_http_address"`
 	HTTPAddress       string `toml:"http_address"`
 	BearerToken       string `toml:"bearer_token"`
-	KeepaliveInterval int    `toml:"keepalive_interval"` // in seconds, 0 to disable
+	KeepaliveInterval int    `toml:"keepalive_interval"` // in seconds, negative to disable
 }
 
 var (
@@ -37,7 +37,7 @@ var (
 	nsqdHTTPAddr      = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
 	httpAddress       = flag.String("http-address", "", "HTTP server address (required)")
 	bearerToken       = flag.String("bearer-token", "", "Bearer token for authentication (required)")
-	keepaliveInterval = flag.Int("keepalive-interval", 0, "Keepalive interval in seconds for SSE consumers (default: 60, 0 to disable)")
+	keepaliveInterval = flag.Int("keepalive-interval", 0, "Keepalive interval in seconds for SSE consumers (default: 60, negative to disable)")
 
 	finalConfig           AppConfig
 	producer              *nsq.Producer
@@ -673,6 +673,8 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Consumer %s connected for topic=%s channel=%s", consumerKey, topic, channel)
 
 	// Setup keepalive ticker if enabled (interval > 0)
+	// Note: When keepalive is disabled, keepaliveChan remains nil,
+	// and nil channels are never selected in Go select statements.
 	var keepaliveTicker *time.Ticker
 	var keepaliveChan <-chan time.Time
 	if finalConfig.KeepaliveInterval > 0 {
