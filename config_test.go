@@ -41,6 +41,22 @@ bearer_token = "file-token"
 	if loaded {
 		t.Fatalf("expected missing config file to be skipped")
 	}
+
+	malformedPath := filepath.Join(tmpDir, "malformed.toml")
+	malformedContent := []byte(`nsqd_address = "file:4150"
+[[`)
+	if err := os.WriteFile(malformedPath, malformedContent, 0o600); err != nil {
+		t.Fatalf("failed to write malformed config file: %v", err)
+	}
+
+	_, loaded, err = loadConfigFile(malformedPath)
+	if err == nil {
+		t.Fatalf("expected error for malformed config file")
+	}
+
+	if !loaded {
+		t.Fatalf("expected malformed config file attempt to be reported as loaded")
+	}
 }
 
 func TestConfigPrecedence(t *testing.T) {
