@@ -31,9 +31,9 @@ type AppConfig struct {
 
 var (
 	configPath   = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
-	nsqdAddress  = flag.String("nsqd-address", "localhost:4150", "NSQd TCP address")
-	nsqdHTTPAddr = flag.String("nsqd-http-address", "localhost:4151", "NSQd HTTP address")
-	httpAddress  = flag.String("http-address", ":8080", "HTTP server address")
+	nsqdAddress  = flag.String("nsqd-address", "", "NSQd TCP address (required)")
+	nsqdHTTPAddr = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
+	httpAddress  = flag.String("http-address", "", "HTTP server address (required)")
 	bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
 
 	producer              *nsq.Producer
@@ -53,14 +53,6 @@ func envOrDefault(key, defaultValue string) string {
 	}
 
 	return defaultValue
-}
-
-func defaultAppConfig() AppConfig {
-	return AppConfig{
-		NSQDAddress:     "localhost:4150",
-		NSQDHTTPAddress: "localhost:4151",
-		HTTPAddress:     ":8080",
-	}
 }
 
 func mergeConfig(base *AppConfig, override AppConfig) {
@@ -139,6 +131,32 @@ func applyCLIOverrides(cfg *AppConfig, visited map[string]bool) {
 	}
 }
 
+func validateConfig(cfg AppConfig) error {
+	var missing []string
+
+	if cfg.NSQDAddress == "" {
+		missing = append(missing, "nsqd_address")
+	}
+
+	if cfg.NSQDHTTPAddress == "" {
+		missing = append(missing, "nsqd_http_address")
+	}
+
+	if cfg.HTTPAddress == "" {
+		missing = append(missing, "http_address")
+	}
+
+	if cfg.BearerToken == "" {
+		missing = append(missing, "bearer_token")
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required configuration values: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
+}
+
 // messageWithExpiry wraps an NSQ message with an expiry time
 type messageWithExpiry struct {
 	message *nsq.Message
@@ -153,7 +171,7 @@ func main() {
 		visitedFlags[f.Name] = true
 	})
 
-	config := defaultAppConfig()
+	var config AppConfig
 	fileConfig, loaded, err := loadConfigFile(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config file %s: %v", *configPath, err)
@@ -167,15 +185,14 @@ func main() {
 	applyEnvOverrides(&config)
 	applyCLIOverrides(&config, visitedFlags)
 
+        if err := validateConfig(config); err != nil {
+                log.Fatalf("%v", err)
+        }
+
 	*nsqdAddress = config.NSQDAddress
 	*nsqdHTTPAddr = config.NSQDHTTPAddress
 	*httpAddress = config.HTTPAddress
 	*bearerToken = config.BearerToken
-
-	if *bearerToken == "" {
-		log.Fatalf("Bearer token is required. Use -bearer-token flag")
-	}
-
 	// Pre-calculate bearer token hash for constant-time comparison
 	bearerTokenHash = sha256.Sum256([]byte(*bearerToken))
 

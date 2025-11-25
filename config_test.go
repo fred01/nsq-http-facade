@@ -44,11 +44,13 @@ bearer_token = "file-token"
 }
 
 func TestConfigPrecedence(t *testing.T) {
-	cfg := defaultAppConfig()
+	cfg := AppConfig{}
 
 	mergeConfig(&cfg, AppConfig{
-		NSQDAddress: "file:4150",
-		BearerToken: "file-token",
+		NSQDAddress:     "file:4150",
+		NSQDHTTPAddress: "file:4151",
+		HTTPAddress:     "file:8081",
+		BearerToken:     "file-token",
 	})
 
 	t.Setenv("NSQ_HTTP_FACADE_NSQD_ADDRESS", "env:4150")
@@ -60,10 +62,10 @@ func TestConfigPrecedence(t *testing.T) {
 		"bearer-token":      true,
 	}
 
-	originalHTTPAddr := *nsqdHTTPAddr
+	originalNSQDHTTPAddr := *nsqdHTTPAddr
 	originalBearerToken := *bearerToken
 	defer func() {
-		*nsqdHTTPAddr = originalHTTPAddr
+		*nsqdHTTPAddr = originalNSQDHTTPAddr
 		*bearerToken = originalBearerToken
 	}()
 
@@ -84,7 +86,25 @@ func TestConfigPrecedence(t *testing.T) {
 		t.Fatalf("expected CLI override to win for BearerToken, got %s", cfg.BearerToken)
 	}
 
-	if cfg.HTTPAddress != defaultAppConfig().HTTPAddress {
-		t.Fatalf("expected HTTPAddress to remain default, got %s", cfg.HTTPAddress)
+	if cfg.HTTPAddress != "file:8081" {
+		t.Fatalf("expected HTTPAddress to remain configured, got %s", cfg.HTTPAddress)
+	}
+}
+
+func TestValidateConfig(t *testing.T) {
+	err := validateConfig(AppConfig{})
+	if err == nil || err.Error() != "missing required configuration values: nsqd_address, nsqd_http_address, http_address, bearer_token" {
+		t.Fatalf("expected aggregated missing parameters error, got %v", err)
+	}
+
+	cfg := AppConfig{
+		NSQDAddress:     "n:4150",
+		NSQDHTTPAddress: "n:4151",
+		HTTPAddress:     "n:8080",
+		BearerToken:     "token",
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("expected valid config, got %v", err)
 	}
 }
