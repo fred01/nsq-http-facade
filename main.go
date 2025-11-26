@@ -21,20 +21,23 @@ import (
 )
 
 const defaultConfigFile = "/etc/nsq-http-facade/config.toml"
+const defaultSSEKeepaliveIntervalSec = 60 // seconds
 
 type AppConfig struct {
-	NSQDAddress     string `toml:"nsqd_address"`
-	NSQDHTTPAddress string `toml:"nsqd_http_address"`
-	HTTPAddress     string `toml:"http_address"`
-	BearerToken     string `toml:"bearer_token"`
+	NSQDAddress              string `toml:"nsqd_address"`
+	NSQDHTTPAddress          string `toml:"nsqd_http_address"`
+	HTTPAddress              string `toml:"http_address"`
+	BearerToken              string `toml:"bearer_token"`
+	SSEKeepaliveIntervalSec  int    `toml:"sse_keepalive_interval_sec"` // in seconds, negative to disable
 }
 
 var (
-	configPath   = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
-	nsqdAddress  = flag.String("nsqd-address", "", "NSQd TCP address (required)")
-	nsqdHTTPAddr = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
-	httpAddress  = flag.String("http-address", "", "HTTP server address (required)")
-	bearerToken  = flag.String("bearer-token", "", "Bearer token for authentication (required)")
+	configPath        = flag.String("config", envOrDefault("NSQ_HTTP_FACADE_CONFIG", defaultConfigFile), "Path to TOML config file")
+	nsqdAddress       = flag.String("nsqd-address", "", "NSQd TCP address (required)")
+	nsqdHTTPAddr      = flag.String("nsqd-http-address", "", "NSQd HTTP address (required)")
+	httpAddress       = flag.String("http-address", "", "HTTP server address (required)")
+	bearerToken       = flag.String("bearer-token", "", "Bearer token for authentication (required)")
+	sseKeepaliveIntervalSec = flag.Int("sse-keepalive-interval-sec", 0, "SSE keepalive interval in seconds for consumers (default: 60, negative to disable)")
 
 	finalConfig           AppConfig
 	producer              *nsq.Producer
@@ -72,6 +75,10 @@ func mergeConfig(base *AppConfig, override AppConfig) {
 	if override.BearerToken != "" {
 		base.BearerToken = override.BearerToken
 	}
+
+	if override.SSEKeepaliveIntervalSec != 0 {
+		base.SSEKeepaliveIntervalSec = override.SSEKeepaliveIntervalSec
+	}
 }
 
 func loadConfigFile(path string) (AppConfig, bool, error) {
@@ -108,6 +115,12 @@ func applyEnvOverrides(cfg *AppConfig) {
 	if value := os.Getenv("NSQ_HTTP_FACADE_BEARER_TOKEN"); value != "" {
 		cfg.BearerToken = value
 	}
+
+	if value := os.Getenv("NSQ_HTTP_FACADE_SSE_KEEPALIVE_INTERVAL_SEC"); value != "" {
+		if interval, err := strconv.Atoi(value); err == nil {
+			cfg.SSEKeepaliveIntervalSec = interval
+		}
+	}
 }
 
 func applyCLIOverrides(cfg *AppConfig, visited map[string]bool) {
@@ -125,6 +138,10 @@ func applyCLIOverrides(cfg *AppConfig, visited map[string]bool) {
 
 	if visited["bearer-token"] {
 		cfg.BearerToken = *bearerToken
+	}
+
+	if visited["sse-keepalive-interval-sec"] {
+		cfg.SSEKeepaliveIntervalSec = *sseKeepaliveIntervalSec
 	}
 }
 
@@ -184,6 +201,11 @@ func main() {
 
 	if err := validateConfig(config); err != nil {
 		log.Fatalf("%v", err)
+	}
+
+	// Set default SSE keepalive interval if not configured
+	if config.SSEKeepaliveIntervalSec == 0 {
+		config.SSEKeepaliveIntervalSec = defaultSSEKeepaliveIntervalSec
 	}
 
 	finalConfig = config
@@ -650,6 +672,17 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Consumer %s connected for topic=%s channel=%s", consumerKey, topic, channel)
 
+	// Setup keepalive ticker if enabled (interval > 0)
+	// Note: When keepalive is disabled, keepaliveChan remains nil,
+	// and nil channels are never selected in Go select statements.
+	var keepaliveTicker *time.Ticker
+	var keepaliveChan <-chan time.Time
+	if finalConfig.SSEKeepaliveIntervalSec > 0 {
+		keepaliveTicker = time.NewTicker(time.Duration(finalConfig.SSEKeepaliveIntervalSec) * time.Second)
+		keepaliveChan = keepaliveTicker.C
+		defer keepaliveTicker.Stop()
+	}
+
 	// Stream messages as SSE
 	ctx := r.Context()
 	for {
@@ -657,6 +690,10 @@ func handleConsumerEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			// Client disconnected
 			return
+		case <-keepaliveChan:
+			// Send SSE comment to keep connection alive
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
 		case msg, ok := <-messageChan:
 			if !ok {
 				return

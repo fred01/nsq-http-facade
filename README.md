@@ -8,6 +8,7 @@ A simple HTTP REST facade for NSQ (NSQd) written in Go. This service provides HT
 - **Producer endpoints** (PUB, MPUB) - publish single or multiple messages
 - **Per-client NSQ consumers** - each HTTP client gets its own NSQ consumer for native load balancing
 - **Consumer SSE endpoint** - consume messages in real-time via Server-Sent Events
+- **SSE keepalive** - configurable keepalive comments to maintain long-lived connections
 - **Consumer control** - RDY flow control for consumers
 - **Message lifecycle management** - touch, finish, and requeue messages with automatic expiry
 - **Admin pass-through** - proxy requests to NSQd HTTP API
@@ -85,6 +86,7 @@ All runtime parameters are required; the process exits if any are missing. Confi
    - `NSQ_HTTP_FACADE_NSQD_HTTP_ADDRESS`
    - `NSQ_HTTP_FACADE_HTTP_ADDRESS`
    - `NSQ_HTTP_FACADE_BEARER_TOKEN`
+   - `NSQ_HTTP_FACADE_SSE_KEEPALIVE_INTERVAL_SEC`
 3. Command-line flags.
 
 Copy `config.toml.example` to your preferred path and fill in all values to bootstrap configuration quickly.
@@ -95,6 +97,7 @@ nsqd_address = "localhost:4150"
 nsqd_http_address = "localhost:4151"
 http_address = ":8080"
 bearer_token = "your-secret-token"
+# sse_keepalive_interval_sec = 60  # SSE keepalive interval in seconds (default: 60, negative to disable)
 ```
 
 ### Command-line Flags
@@ -104,6 +107,7 @@ bearer_token = "your-secret-token"
 - `-nsqd-address` - NSQd TCP address (required)
 - `-nsqd-http-address` - NSQd HTTP address (required)
 - `-http-address` - HTTP server listen address (required)
+- `-sse-keepalive-interval-sec` - SSE keepalive interval in seconds for consumers (default: 60, negative to disable)
 
 ## API Documentation
 
@@ -193,6 +197,7 @@ This endpoint returns a stream of Server-Sent Events. Each event contains:
 - Messages received via SSE have `DisableAutoResponse()` enabled. You must explicitly finish, requeue, or touch each message using the message lifecycle endpoints.
 - **Native NSQ load balancing**: Each HTTP client creates its own NSQ consumer. When multiple clients connect to the same topic/channel, NSQ distributes messages across them (one message per consumer), just like native NSQ clients.
 - This enables horizontal scaling: add more HTTP clients to process messages in parallel.
+- **Keepalive**: The server sends SSE comment lines (`: keepalive`) at a configurable interval (default: 60 seconds) to keep the connection alive.
 
 #### Set Consumer RDY Count
 

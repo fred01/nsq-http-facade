@@ -6,3 +6,7 @@ nsqd_address = "localhost:4150"
 nsqd_http_address = "localhost:4151"
 http_address = ":8080"
 bearer_token = "change-me"
+
+# SSE keepalive interval in seconds for consumers (default: 60)
+# Set to a negative value to disable keepalive
+# sse_keepalive_interval_sec = 60
